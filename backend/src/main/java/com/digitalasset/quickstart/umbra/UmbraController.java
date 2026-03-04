@@ -543,6 +543,20 @@ public class UmbraController {
                     "details", String.valueOf(sre.getStatus().getDescription())
             ));
         }
+        if (root instanceof StatusRuntimeException sre && sre.getStatus().getCode() == Status.Code.UNAVAILABLE) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "error", action + " failed because the ledger is unavailable. Wait for canton/splice/backend to become healthy and retry.",
+                    "code", "LEDGER_UNAVAILABLE",
+                    "details", String.valueOf(sre.getStatus().getDescription())
+            ));
+        }
+        if (root instanceof StatusRuntimeException sre && sre.getStatus().getCode() == Status.Code.DEADLINE_EXCEEDED) {
+            return ResponseEntity.status(504).body(Map.of(
+                    "error", action + " timed out while waiting for the ledger.",
+                    "code", "LEDGER_TIMEOUT",
+                    "details", String.valueOf(sre.getStatus().getDescription())
+            ));
+        }
         return ResponseEntity.internalServerError().body(
                 Map.of("error", root.getMessage() == null ? action + " failed" : root.getMessage())
         );

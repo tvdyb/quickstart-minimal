@@ -10,6 +10,7 @@
 # local env
 .env.local
 .direnv/
+.cache/
 
 # DAML local SDK/cache
 .sdk/

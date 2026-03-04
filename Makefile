@@ -7,6 +7,14 @@
 # Determine the operating system
 KERNEL_NAME := $(shell uname -s)
 
+# Prefer Homebrew Java 21 on Apple Silicon whenever available.
+ifneq (,$(wildcard /opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home/bin/java))
+  export JAVA_HOME := /opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
+endif
+ifneq ($(strip $(JAVA_HOME)),)
+  export PATH := $(JAVA_HOME)/bin:$(PATH)
+endif
+
 ifneq (,$(wildcard .env))
     include .env
 endif
@@ -29,6 +37,18 @@ endif
 # cross-repo environment leakage (e.g. exported MODULES_DIR/LOCALNET_DIR).
 export MODULES_DIR := $(shell pwd)/docker/modules
 export LOCALNET_DIR := $(MODULES_DIR)/localnet
+
+# Keep tool caches local to the repo for reproducible behavior across shells
+# and to avoid permission issues in user home directories.
+CACHE_DIR ?= $(shell pwd)/.cache
+export GRADLE_USER_HOME ?= $(CACHE_DIR)/gradle
+export KOTLIN_DAEMON_DIR ?= $(CACHE_DIR)/kotlin-daemon
+export npm_config_cache ?= $(CACHE_DIR)/npm
+
+# Prefer classic docker compose build path to avoid buildx state permission
+# issues on some local setups.
+export DOCKER_BUILDKIT ?= 0
+export COMPOSE_DOCKER_CLI_BUILD ?= 0
 
 # Print out info about paths:
 ifdef PATH_DEBUG_INFO
@@ -140,20 +160,36 @@ endef
 
 SETUP_COMMAND := ./gradlew configureProfiles --no-daemon --console=plain --quiet
 
+.PHONY: ensure-cache-dirs
+ensure-cache-dirs:
+	mkdir -p "$(GRADLE_USER_HOME)" "$(KOTLIN_DAEMON_DIR)" "$(npm_config_cache)"
+
+.PHONY: check-java
+check-java:
+	@major=$$(java -version 2>&1 | awk -F[\".] '/version/ {print $$2; exit}'); \
+	if [ "$$major" != "21" ]; then \
+	  echo "✗ Java 21 is required for this repo; detected Java $$major."; \
+	  echo "  Example fix:"; \
+	  echo "  export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"; \
+	  echo "  export PATH=\"\$$JAVA_HOME/bin:\$$PATH\""; \
+	  exit 1; \
+	fi; \
+	echo "✓ Java 21 detected"
+
 # Build targets
 .PHONY: build
 build: $(FIRST_RUN_DEPENDENCY) build-frontend build-backend build-daml build-docker-images ## Build frontend, backend, Daml model and docker images
 
 .PHONY: build-frontend
-build-frontend: ## Build the frontend application
+build-frontend: ensure-cache-dirs ## Build the frontend application
 	cd frontend && npm install && npm run build
 
 .PHONY: build-backend
-build-backend: ## Build the backend service
+build-backend: ensure-cache-dirs check-java ## Build the backend service
 	./gradlew :backend:build
 
 .PHONY: build-daml
-build-daml: ## Build the Daml model
+build-daml: ensure-cache-dirs check-java ## Build the Daml model
 	./gradlew :daml:build distTar
 
 .PHONY: docker-available
@@ -251,6 +287,12 @@ vite-dev:
 .PHONY: stop
 stop: docker-available ## Stop the application and observability services
 	$(call docker-compose, ${DOCKER_COMPOSE_OBSERVABILITY_FILES} $(RESOURCE_CONSTRAINT_CONFIG) down)
+
+.PHONY: reset-stack
+reset-stack: ## Force-clean quickstart containers/network and stop compose stack
+	$(call docker-compose, ${DOCKER_COMPOSE_OBSERVABILITY_FILES} $(RESOURCE_CONSTRAINT_CONFIG) down -v --remove-orphans)
+	-docker rm -f loki tempo prometheus grafana nginx backend-service pqs-app-provider splice-onboarding splice canton keycloak nginx-keycloak postgres wallet-web-ui-sv wallet-web-ui-app-user wallet-web-ui-app-provider ans-web-ui-app-provider ans-web-ui-app-user sv-web-ui scan-web-ui nginx-metrics postgres-metrics swagger-ui otel-collector cadvisor 2>/dev/null || true
+	-docker network rm quickstart 2>/dev/null || true
 
 .PHONY: stop-application
 stop-application: docker-available ## Stop the application, leaving observability services running
