@@ -25,13 +25,10 @@ else
 FIRST_RUN_DEPENDENCY := first-run-setup
 endif
 
-ifndef MODULES_DIR
-  export MODULES_DIR=$(shell pwd)/docker/modules
-endif
-
-ifndef LOCALNET_DIR
-  export LOCALNET_DIR=$(MODULES_DIR)/localnet
-endif
+# Always resolve module paths from the current repo to avoid accidental
+# cross-repo environment leakage (e.g. exported MODULES_DIR/LOCALNET_DIR).
+override MODULES_DIR := $(shell pwd)/docker/modules
+override LOCALNET_DIR := $(MODULES_DIR)/localnet
 
 # Print out info about paths:
 ifdef PATH_DEBUG_INFO
