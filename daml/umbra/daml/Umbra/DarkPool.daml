@@ -55,15 +55,19 @@ template SpotOrder
         assertMsg "Order must be Open to cancel" (status == Open)
         create this with status = Cancelled
 
-    choice FillOrder : (ContractId TradeConfirm, ContractId ActivityRecord)
+    choice FillOrder : (ContractId TradeConfirm, Optional (ContractId SpotOrder), ContractId ActivityRecord)
       with
         fillPrice : Price
+        fillQuantity : Quantity
         counterparty : Party
       controller operator
       do
         now <- getTime
         assertMsg "Order must be Open to fill" (status == Open)
         assertMsg "Fill price must be positive" (fillPrice > 0.0)
+        assertMsg "Fill quantity must be positive" (fillQuantity > 0.0)
+        assertMsg "Fill quantity cannot exceed remaining quantity" (fillQuantity <= quantity)
+        let remainingQuantity = quantity - fillQuantity
         confirm <- create TradeConfirm with
           operator
           buyer = if side == Buy then trader else counterparty
@@ -71,16 +75,22 @@ template SpotOrder
           baseAsset
           quoteAsset
           price = fillPrice
-          quantity
+          quantity = fillQuantity
           executedAt = now
+        residualOrder <-
+          if remainingQuantity <= 0.0000001
+            then pure None
+            else do
+              residual <- create this with quantity = remainingQuantity, createdAt = now
+              pure (Some residual)
         activity <- create ActivityRecord with
           operator
           user = trader
           activityType = "TRADE"
-          description = "Dark pool trade: " <> show quantity <> " " <> baseAsset <> "/" <> quoteAsset
+          description = "Dark pool trade: " <> show fillQuantity <> " " <> baseAsset <> "/" <> quoteAsset
           timestamp = now
-          rewardWeight = quantity * fillPrice
-        return (confirm, activity)
+          rewardWeight = fillQuantity * fillPrice
+        return (confirm, residualOrder, activity)
 
 -- | Trade confirmation
 template TradeConfirm

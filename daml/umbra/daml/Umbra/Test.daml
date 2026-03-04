@@ -21,7 +21,7 @@ testDarkPool = script do
 
   setTime (time (date 2026 Jan 15) 12 0 0)
 
-  -- Alice creates a buy order
+  -- Alice creates a buy order with quantity 2.0
   buyOrder <- submitMulti [operator, alice] [] do
     exerciseCmd poolOp CreateOrder with
       trader = alice
@@ -29,9 +29,9 @@ testDarkPool = script do
       quoteAsset = "USDC"
       side = Buy
       price = 50000.0
-      quantity = 1.0
+      quantity = 2.0
 
-  -- Bob creates a sell order
+  -- Bob creates a sell order with quantity 1.0
   sellOrder <- submitMulti [operator, bob] [] do
     exerciseCmd poolOp CreateOrder with
       trader = bob
@@ -41,16 +41,44 @@ testDarkPool = script do
       price = 50000.0
       quantity = 1.0
 
-  -- Operator matches: fill Alice's buy (operator is controller of FillOrder)
-  (_, _) <- submit operator do
+  -- Operator partially fills Alice's buy by 1.0 BTC.
+  (_, buyResidualOpt, _) <- submit operator do
     exerciseCmd buyOrder FillOrder with
       fillPrice = 50000.0
+      fillQuantity = 1.0
       counterparty = bob
 
-  -- Fill Bob's sell
-  (_, _) <- submit operator do
+  -- Bob's sell is fully filled.
+  (_, _, _) <- submit operator do
     exerciseCmd sellOrder FillOrder with
       fillPrice = 50000.0
+      fillQuantity = 1.0
+      counterparty = alice
+
+  buyResidual <- case buyResidualOpt of
+    Some cid -> pure cid
+    None -> abort "Expected residual buy order after partial fill"
+
+  -- Create another sell order to complete the remaining buy quantity.
+  sellOrder2 <- submitMulti [operator, bob] [] do
+    exerciseCmd poolOp CreateOrder with
+      trader = bob
+      baseAsset = "BTC"
+      quoteAsset = "USDC"
+      side = Sell
+      price = 50000.0
+      quantity = 1.0
+
+  (_, _, _) <- submit operator do
+    exerciseCmd buyResidual FillOrder with
+      fillPrice = 50000.0
+      fillQuantity = 1.0
+      counterparty = bob
+
+  (_, _, _) <- submit operator do
+    exerciseCmd sellOrder2 FillOrder with
+      fillPrice = 50000.0
+      fillQuantity = 1.0
       counterparty = alice
 
   -- Cancel test
@@ -108,6 +136,9 @@ testLending = script do
       asset = "USDC"
       totalSupply = 0.0
       totalBorrows = 0.0
+      reserves = 0.0
+      reserveFactor = 0.10
+      borrowCap = 1200.0
       rateModel
       collateralConfig = defaultCCCollateral
       lastUpdateTime = startTime
@@ -164,26 +195,56 @@ testLending = script do
     Some _ -> abort "Expected no residual borrow position after full repay"
     None -> pure ()
 
+  -- Old oracle contracts are now stale (next day with 1h max age), borrowing should fail.
+  submitMultiMustFail [operator, bob] [] do
+    exerciseCmd pool6 Borrow with
+      borrower = bob
+      borrowAmount = 100.0
+      collateralAmount = 30.0
+      oracleCid = usdcOracle
+      collateralOracleCid = ccOracle
+
+  -- Refresh oracle data.
+  usdcOracleFresh <- submit oracle do
+    exerciseCmd usdcOracle UpdatePrice with
+      newPrice = 1.0
+  ccOracleFresh <- submit oracle do
+    exerciseCmd ccOracle UpdatePrice with
+      newPrice = 10.0
+
+  -- Borrow cap enforcement.
+  submitMultiMustFail [operator, bob] [] do
+    exerciseCmd pool6 Borrow with
+      borrower = bob
+      borrowAmount = 1300.0
+      collateralAmount = 300.0
+      oracleCid = usdcOracleFresh
+      collateralOracleCid = ccOracleFresh
+
   -- Open a new borrow to test liquidation.
   (pool7, riskyBorrow, _) <- submitMulti [operator, bob] [] do
     exerciseCmd pool6 Borrow with
       borrower = bob
       borrowAmount = 500.0
       collateralAmount = 120.0
-      oracleCid = usdcOracle
-      collateralOracleCid = ccOracle
+      oracleCid = usdcOracleFresh
+      collateralOracleCid = ccOracleFresh
 
   -- Drop collateral price so the position becomes liquidatable.
   ccOracleDown <- submit oracle do
-    exerciseCmd ccOracle UpdatePrice with
+    exerciseCmd ccOracleFresh UpdatePrice with
       newPrice = 3.0
 
-  (_pool8, _, _) <- submit operator do
+  (_pool8, liquidationResidualOpt, _) <- submit operator do
     exerciseCmd riskyBorrow Liquidate with
       liquidator = operator
       poolCid = pool7
-      borrowOracleCid = usdcOracle
+      borrowOracleCid = usdcOracleFresh
       collateralOracleCid = ccOracleDown
+
+  case liquidationResidualOpt of
+    Some _ -> pure ()
+    None -> abort "Expected residual debt after liquidation due to close factor"
 
   return ()
 

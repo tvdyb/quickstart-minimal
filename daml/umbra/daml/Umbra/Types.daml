@@ -33,6 +33,8 @@ data CollateralConfig = CollateralConfig
     ltvRatio : Decimal              -- Loan-to-value ratio (e.g., 0.55 = 55%)
     liquidationThreshold : Decimal  -- Liquidation threshold (e.g., 0.65 = 65%)
     liquidationBonus : Decimal      -- Bonus for liquidators (e.g., 0.05 = 5%)
+    closeFactor : Decimal           -- Max fraction of debt that can be liquidated per liquidation
+    oracleMaxAgeSeconds : Decimal   -- Max oracle staleness before borrow/liquidate is blocked
   deriving (Eq, Show)
 
 -- | Default CC collateral config
@@ -43,3 +45,5 @@ defaultCCCollateral = CollateralConfig
     ltvRatio = 0.55
     liquidationThreshold = 0.65
     liquidationBonus = 0.05
+    closeFactor = 0.50
+    oracleMaxAgeSeconds = 3600.0
