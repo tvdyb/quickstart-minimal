@@ -141,13 +141,49 @@ testLending = script do
   let nextDay = time (date 2026 Jan 16) 12 0 0
   setTime nextDay
 
-  _pool4 <- submit operator do
+  pool4 <- submit operator do
     exerciseCmd pool3 AccrueInterest
 
-  -- Bob repays
-  submitMulti [operator, bob] [] do
+  -- Bob partially repays from the accrued debt.
+  (pool5, residualOpt, _) <- submitMulti [operator, bob] [] do
     exerciseCmd borrowPos Repay with
-      repayAmount = 1000.0
+      poolCid = pool4
+      repayAmount = 250.0
+
+  residualBorrow <- case residualOpt of
+    Some cid -> pure cid
+    None -> abort "Expected residual borrow position after partial repay"
+
+  -- Bob fully closes remaining debt.
+  (pool6, residualOpt2, _) <- submitMulti [operator, bob] [] do
+    exerciseCmd residualBorrow Repay with
+      poolCid = pool5
+      repayAmount = 2000.0
+
+  case residualOpt2 of
+    Some _ -> abort "Expected no residual borrow position after full repay"
+    None -> pure ()
+
+  -- Open a new borrow to test liquidation.
+  (pool7, riskyBorrow, _) <- submitMulti [operator, bob] [] do
+    exerciseCmd pool6 Borrow with
+      borrower = bob
+      borrowAmount = 500.0
+      collateralAmount = 120.0
+      oracleCid = usdcOracle
+      collateralOracleCid = ccOracle
+
+  -- Drop collateral price so the position becomes liquidatable.
+  ccOracleDown <- submit oracle do
+    exerciseCmd ccOracle UpdatePrice with
+      newPrice = 3.0
+
+  (_pool8, _, _) <- submit operator do
+    exerciseCmd riskyBorrow Liquidate with
+      liquidator = operator
+      poolCid = pool7
+      borrowOracleCid = usdcOracle
+      collateralOracleCid = ccOracleDown
 
   return ()
 

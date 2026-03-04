@@ -3,7 +3,7 @@ module Umbra.Lending where
 import Umbra.Types
 import Umbra.Oracle (OraclePrice(..))
 import Umbra.ActivityMarker (ActivityRecord(..))
-import DA.Time (RelTime, subTime, convertRelTimeToMicroseconds)
+import DA.Time (subTime, convertRelTimeToMicroseconds)
 
 -- | Lending pool template
 template LendingPool
@@ -122,6 +122,7 @@ template LendingPool
           entryIndex = accumulatedIndex
           liquidationThreshold = collateralConfig.liquidationThreshold
           createdAt = now
+          updatedAt = now
         activity <- create ActivityRecord with
           operator
           user = borrower
@@ -151,7 +152,7 @@ template SupplyPosition
         pool <- fetch poolCid
         -- Calculate accrued interest
         let growthFactor = pool.accumulatedIndex / entryIndex
-        let totalAmount = amount * growthFactor
+        let _totalAmount = amount * growthFactor
         -- In a real system, we'd transfer tokens here
         return ()
 
@@ -167,6 +168,7 @@ template BorrowPosition
     entryIndex : Decimal
     liquidationThreshold : Decimal
     createdAt : Time
+    updatedAt : Time
   where
     signatory operator, borrower
 
@@ -189,37 +191,111 @@ template BorrowPosition
           then return 999.0
           else return (liquidationValue / debtValue)
 
-    -- | Repay borrow
-    choice Repay : ()
+    -- | Repay borrow (supports partial repayment and pool accounting).
+    --   Repayment is valued at the pool's current index.
+    choice Repay : (ContractId LendingPool, Optional (ContractId BorrowPosition), ContractId ActivityRecord)
       with
+        poolCid : ContractId LendingPool
         repayAmount : Decimal
-      controller borrower
+      controller operator, borrower
       do
-        assertMsg "Repay amount must cover debt" (repayAmount >= borrowAmount)
-        return ()
+        assertMsg "Repay amount must be positive" (repayAmount > 0.0)
+        pool <- fetch poolCid
+        assertMsg "Pool asset mismatch" (pool.asset == borrowAsset)
 
-    -- | Liquidate undercollateralized position
-    choice Liquidate : ContractId ActivityRecord
+        let currentIndex = pool.accumulatedIndex
+        let growthFactor = currentIndex / entryIndex
+        let currentDebt = borrowAmount * growthFactor
+        let appliedRepayment = min repayAmount currentDebt
+        let debtAfterRepay = currentDebt - appliedRepayment
+        let newTotalBorrows = max 0.0 (pool.totalBorrows - appliedRepayment)
+
+        archive poolCid
+        newPool <- create pool with totalBorrows = newTotalBorrows
+
+        now <- getTime
+        residualPosition <-
+          if debtAfterRepay <= 0.0000001
+            then pure None
+            else do
+              residual <- create this with
+                borrowAmount = debtAfterRepay
+                entryIndex = currentIndex
+                updatedAt = now
+              pure (Some residual)
+
+        activity <- create ActivityRecord with
+          operator
+          user = borrower
+          activityType = "REPAY"
+          description = "Repaid " <> show appliedRepayment <> " " <> borrowAsset <> " (remaining debt " <> show debtAfterRepay <> ")"
+          timestamp = now
+          rewardWeight = appliedRepayment
+
+        pure (newPool, residualPosition, activity)
+
+    -- | Liquidate undercollateralized position.
+    --   Seizes collateral with liquidation bonus and may leave residual bad debt.
+    choice Liquidate : (ContractId LendingPool, Optional (ContractId BorrowPosition), ContractId ActivityRecord)
       with
         liquidator : Party
+        poolCid : ContractId LendingPool
         borrowOracleCid : ContractId OraclePrice
         collateralOracleCid : ContractId OraclePrice
-        currentIndex : Decimal
       controller operator
       do
         now <- getTime
+        pool <- fetch poolCid
         borrowOracle <- fetch borrowOracleCid
         collateralOracle <- fetch collateralOracleCid
+        let currentIndex = pool.accumulatedIndex
         let growthFactor = currentIndex / entryIndex
         let currentDebt = borrowAmount * growthFactor
         let debtValue = currentDebt * borrowOracle.price
         let collateralValue = collateralAmount * collateralOracle.price
-        let healthFactor = (collateralValue * liquidationThreshold) / debtValue
+        let healthFactor =
+              if debtValue == 0.0
+                then 999.0
+                else (collateralValue * liquidationThreshold) / debtValue
         assertMsg "Position is not liquidatable (health factor >= 1)" (healthFactor < 1.0)
-        create ActivityRecord with
+
+        let liquidationBonusFactor = 1.0 + pool.collateralConfig.liquidationBonus
+        let maxDebtCoveredByCollateral =
+              if borrowOracle.price <= 0.0
+                then 0.0
+                else collateralValue / (borrowOracle.price * liquidationBonusFactor)
+        let debtRepaid = min currentDebt maxDebtCoveredByCollateral
+        assertMsg "Collateral has no liquidation value" (debtRepaid > 0.0)
+        let debtAfter = currentDebt - debtRepaid
+        let collateralSeized =
+              if collateralOracle.price <= 0.0
+                then collateralAmount
+                else (debtRepaid * borrowOracle.price * liquidationBonusFactor) / collateralOracle.price
+        let collateralAfter = max 0.0 (collateralAmount - collateralSeized)
+        let newTotalBorrows = max 0.0 (pool.totalBorrows - debtRepaid)
+
+        archive poolCid
+        newPool <- create pool with totalBorrows = newTotalBorrows
+
+        residualPosition <-
+          if debtAfter <= 0.0000001
+            then pure None
+            else do
+              residual <- create this with
+                borrowAmount = debtAfter
+                collateralAmount = collateralAfter
+                entryIndex = currentIndex
+                updatedAt = now
+              pure (Some residual)
+
+        activity <- create ActivityRecord with
           operator
           user = liquidator
           activityType = "LIQUIDATE"
-          description = "Liquidated position: " <> show currentDebt <> " " <> borrowAsset
+          description =
+            "Liquidated debt " <> show debtRepaid <> " " <> borrowAsset
+              <> " (residual " <> show debtAfter <> ", collateral seized " <> show collateralSeized <> " " <> collateralAsset <> ")"
           timestamp = now
-          rewardWeight = debtValue
+          rewardWeight = debtRepaid * borrowOracle.price
+
+        pure (newPool, residualPosition, activity)

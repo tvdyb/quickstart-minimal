@@ -370,24 +370,34 @@ public class UmbraController {
                     ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Position contract id is required"))
             );
         }
+        final String borrowerParty = borrower;
+        final double requestedRepayAmount = repayAmount;
+        final String positionContractId = contractId;
 
-        ValueOuterClass.Value choiceArg = recordVal(
-                field("repayAmount", numericVal(repayAmount))
-        );
-
-        return ledger.exerciseChoice(
-                contractId,
-                "Umbra.Lending", "BorrowPosition",
-                "Repay",
-                choiceArg,
-                borrower
-        ).thenApply(tx -> ResponseEntity.ok(Map.<String, Object>of(
-                "status", "repaid",
-                "transactionId", tx.getUpdateId()
-        ))).exceptionally(e -> {
-            logger.error("Repay failed", e);
-            return mapLedgerWriteFailure("Repay", e);
-        });
+        return repo.getLendingPool()
+                .map(pool -> {
+                    String poolContractId = (String) pool.get("contractId");
+                    ValueOuterClass.Value poolAwareArg = recordVal(
+                            field("poolCid", contractIdVal(poolContractId)),
+                            field("repayAmount", numericVal(requestedRepayAmount))
+                    );
+                    return ledger.exerciseChoiceMulti(
+                            positionContractId,
+                            "Umbra.Lending", "BorrowPosition",
+                            "Repay",
+                            poolAwareArg,
+                            List.of(config.getOperatorParty(), borrowerParty)
+                    ).thenApply(tx -> ResponseEntity.ok(Map.<String, Object>of(
+                            "status", "repaid",
+                            "transactionId", tx.getUpdateId()
+                    ))).exceptionally(e -> {
+                        logger.error("Repay failed", e);
+                        return mapLedgerWriteFailure("Repay", e);
+                    });
+                })
+                .orElse(CompletableFuture.completedFuture(
+                        ResponseEntity.badRequest().body(Map.<String, Object>of("error", "LendingPool not found"))
+                ));
     }
 
     /**

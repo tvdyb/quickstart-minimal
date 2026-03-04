@@ -1,2 +1,23 @@
+.gradle
+**/build/
+**/bin/
+!src/**/build/
+
+# IDE / editor
+.idea
+.vscode/
+
+# local env
+.env.local
+.direnv/
+
+# DAML local SDK/cache
+.sdk/
+
+# OS / misc
+.DS_Store
+*.bak
+logs
+
 # TODO ignore entire dashboards dir once Canton dashboards are also coming from Artifactory
 /docker/modules/observability/conf/grafana/dashboards/Participant/pqs.json

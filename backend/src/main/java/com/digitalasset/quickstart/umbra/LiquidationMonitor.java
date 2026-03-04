@@ -48,14 +48,6 @@ public class LiquidationMonitor {
                 return;
             }
 
-            // Get lending pool for accumulated index
-            Optional<Map<String, Object>> poolOpt = repo.getLendingPool();
-            if (poolOpt.isEmpty()) return;
-
-            @SuppressWarnings("unchecked")
-            Map<String, Object> poolPayload = (Map<String, Object>) poolOpt.get().get("payload");
-            double accIndex = Double.parseDouble(String.valueOf(poolPayload.get("accumulatedIndex")));
-
             @SuppressWarnings("unchecked")
             Map<String, Object> borrowOraclePayload = (Map<String, Object>) borrowOracle.get().get("payload");
             double borrowPrice = Double.parseDouble(String.valueOf(borrowOraclePayload.get("price")));
@@ -68,6 +60,16 @@ public class LiquidationMonitor {
             String collOracleCid = (String) collateralOracle.get().get("contractId");
 
             for (Map<String, Object> pos : positions) {
+                Optional<Map<String, Object>> poolOpt = repo.getLendingPool();
+                if (poolOpt.isEmpty()) {
+                    return;
+                }
+
+                @SuppressWarnings("unchecked")
+                Map<String, Object> poolPayload = (Map<String, Object>) poolOpt.get().get("payload");
+                double accIndex = Double.parseDouble(String.valueOf(poolPayload.get("accumulatedIndex")));
+                String poolContractId = (String) poolOpt.get().get("contractId");
+
                 @SuppressWarnings("unchecked")
                 Map<String, Object> payload = (Map<String, Object>) pos.get("payload");
                 String contractId = (String) pos.get("contractId");
@@ -89,9 +91,9 @@ public class LiquidationMonitor {
 
                     ValueOuterClass.Value choiceArg = recordVal(
                             field("liquidator", partyVal(operator)),
+                            field("poolCid", contractIdVal(poolContractId)),
                             field("borrowOracleCid", contractIdVal(borrowOracleCid)),
-                            field("collateralOracleCid", contractIdVal(collOracleCid)),
-                            field("currentIndex", numericVal(accIndex))
+                            field("collateralOracleCid", contractIdVal(collOracleCid))
                     );
 
                     ledger.exerciseChoice(
