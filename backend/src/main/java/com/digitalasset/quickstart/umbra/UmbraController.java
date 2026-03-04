@@ -172,9 +172,7 @@ public class UmbraController {
      */
     @GetMapping("/trades/{trader}")
     public ResponseEntity<List<Map<String, Object>>> getTrades(@PathVariable String trader) {
-        String authenticatedParty = authenticatedPartyProvider.getPartyOrFail();
-        String operatorParty = config.getOperatorParty() == null ? "" : config.getOperatorParty();
-        if (!authenticatedParty.equals(trader) && !authenticatedParty.equals(operatorParty)) {
+        if (!canAccessPartyScope(trader)) {
             return ResponseEntity.status(403).body(List.of());
         }
         try {
@@ -454,6 +452,17 @@ public class UmbraController {
      */
     @GetMapping("/positions/{trader}")
     public ResponseEntity<Map<String, Object>> getPositions(@PathVariable String trader) {
+        if (!canAccessPartyScope(trader)) {
+            String authenticatedParty = authenticatedPartyProvider.getParty().orElse("");
+            String operatorParty = config.getOperatorParty() == null ? "" : config.getOperatorParty();
+            return ResponseEntity.status(403).body(Map.of(
+                    "error", "Can only view your own positions unless logged in as app-provider/operator.",
+                    "code", "FORBIDDEN_PARTY_SCOPE",
+                    "requestedParty", trader,
+                    "authenticatedParty", authenticatedParty,
+                    "operatorParty", operatorParty
+            ));
+        }
         try {
             List<Map<String, Object>> supply = repo.getSupplyPositions(trader).stream().map(this::mapSupplyPosition).toList();
             List<Map<String, Object>> borrow = repo.getBorrowPositions(trader).stream().map(this::mapBorrowPosition).toList();
@@ -511,6 +520,12 @@ public class UmbraController {
             case "sell" -> "Sell";
             default -> "Buy";
         };
+    }
+
+    private boolean canAccessPartyScope(String requestedParty) {
+        String authenticatedParty = authenticatedPartyProvider.getPartyOrFail();
+        String operatorParty = config.getOperatorParty() == null ? "" : config.getOperatorParty();
+        return authenticatedParty.equals(requestedParty) || authenticatedParty.equals(operatorParty);
     }
 
     private ResponseEntity<Map<String, Object>> requireOperatorSession(String action) {
