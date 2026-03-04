@@ -23,6 +23,7 @@ export const cancelOrder = (id: string) => umbra.delete(`/orders/${id}`).then(r 
 
 // Trades
 export const getTrades = (trader: string) => umbra.get(`/trades/${trader}`).then(r => r.data);
+export const getMyTrades = () => umbra.get('/trades/me').then(r => r.data);
 
 // Pool
 export const getPool = () => umbra.get('/pool').then(r => r.data);

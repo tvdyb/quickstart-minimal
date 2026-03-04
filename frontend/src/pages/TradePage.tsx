@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useUserStore } from '../stores/userStore';
-import { getOrderbook, getTrades, getMyOrders } from '../services/umbraApi';
-import Orderbook from '../components/Orderbook';
+import { getMyTrades, getMyOrders } from '../services/umbraApi';
 import OrderEntry from '../components/OrderEntry';
 import MyOrders from '../components/MyOrders';
 import RecentTrades from '../components/RecentTrades';
@@ -12,8 +11,7 @@ import { Link } from 'react-router-dom';
 const TradePage: React.FC = () => {
   const toast = useToast();
   const { user } = useUserStore();
-  const trader = user?.party || user?.name || '';
-  const [orderbook, setOrderbook] = useState<any>({ bids: [], asks: [] });
+  const trader = user?.party || '';
   const [myOrders, setMyOrders] = useState<any[]>([]);
   const [trades, setTrades] = useState<any[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -23,18 +21,6 @@ const TradePage: React.FC = () => {
 
   useEffect(() => {
     const load = async () => {
-      try {
-        const ob = await getOrderbook();
-        setOrderbook({
-          bids: ob.bids || ob.buys || [],
-          asks: ob.asks || ob.sells || [],
-        });
-      } catch (e: any) {
-        console.error(e);
-        const msg = e?.response?.data?.error || e?.message || 'Failed to load orderbook';
-        setLoadError(msg);
-      }
-
       try {
         const mine = await getMyOrders();
         setMyOrders(Array.isArray(mine) ? mine : []);
@@ -46,7 +32,7 @@ const TradePage: React.FC = () => {
 
       if (trader) {
         try {
-          setTrades(await getTrades(trader));
+          setTrades(await getMyTrades());
         } catch (e: any) {
           console.error(e);
           const msg = e?.response?.data?.error || e?.message || 'Failed to load trades';
@@ -80,7 +66,7 @@ const TradePage: React.FC = () => {
     <section className="page-section">
       <div className="page-head">
         <h1 className="page-title">Umbra Dark Pool</h1>
-        <p className="page-subtitle">Private orderbook trading on Canton Network</p>
+        <p className="page-subtitle">Pre-trade depth is hidden. Only your orders and trade executions are shown.</p>
       </div>
       {loadError && (
         <div className="diagnostic-alert mb-3">
@@ -99,7 +85,14 @@ const TradePage: React.FC = () => {
           <div className="debug-col-8">
             <PriceChart trades={trades} />
             <div className="mt-3">
-              <Orderbook bids={orderbook.bids || []} asks={orderbook.asks || []} />
+              <div className="panel">
+                <h3>Hidden Liquidity</h3>
+                <div className="page-subtitle mb-2">Strict dark pool mode is active.</div>
+                <div className="empty-state">
+                  Live bid/ask depth is intentionally not displayed to participants.
+                  Matching is handled by the operator, and only completed executions are shown below.
+                </div>
+              </div>
             </div>
           </div>
           <div className="debug-col-4">

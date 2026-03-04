@@ -45,16 +45,17 @@ public class UmbraController {
     // ── Dark Pool Endpoints ────────────────────────────────
 
     /**
-     * GET /api/orderbook → Aggregated order book (no trader info exposed)
+     * GET /api/orderbook → Dark mode notice (pre-trade depth intentionally hidden)
      */
     @GetMapping("/orderbook")
     public ResponseEntity<Map<String, Object>> getOrderBook() {
-        try {
-            return ResponseEntity.ok(repo.getOrderBook());
-        } catch (Exception e) {
-            logger.error("Failed to get orderbook", e);
-            return ResponseEntity.internalServerError().body(Map.<String, Object>of("error", e.getMessage()));
-        }
+        return ResponseEntity.ok(Map.<String, Object>of(
+                "mode", "dark",
+                "preTradeDepthVisible", false,
+                "message", "Orderbook depth is hidden in dark pool mode.",
+                "bids", List.of(),
+                "asks", List.of()
+        ));
     }
 
     /**
@@ -171,14 +172,25 @@ public class UmbraController {
      */
     @GetMapping("/trades/{trader}")
     public ResponseEntity<List<Map<String, Object>>> getTrades(@PathVariable String trader) {
+        String authenticatedParty = authenticatedPartyProvider.getPartyOrFail();
+        String operatorParty = config.getOperatorParty() == null ? "" : config.getOperatorParty();
+        if (!authenticatedParty.equals(trader) && !authenticatedParty.equals(operatorParty)) {
+            return ResponseEntity.status(403).body(List.of());
+        }
         try {
             List<Map<String, Object>> rows = repo.getTradesForTrader(trader);
-            List<Map<String, Object>> out = rows.stream().map(this::mapTrade).toList();
+            List<Map<String, Object>> out = rows.stream().map(row -> mapTrade(row, trader)).toList();
             return ResponseEntity.ok(out);
         } catch (Exception e) {
             logger.error("Failed to get trades", e);
             return ResponseEntity.internalServerError().build();
         }
+    }
+
+    @GetMapping("/trades/me")
+    public ResponseEntity<List<Map<String, Object>>> getMyTrades() {
+        String trader = authenticatedPartyProvider.getPartyOrFail();
+        return getTrades(trader);
     }
 
     // ── Lending Endpoints ──────────────────────────────────
@@ -577,16 +589,17 @@ public class UmbraController {
         );
     }
 
-    private Map<String, Object> mapTrade(Map<String, Object> row) {
+    private Map<String, Object> mapTrade(Map<String, Object> row, String viewerParty) {
         @SuppressWarnings("unchecked")
         Map<String, Object> payload = (Map<String, Object>) row.get("payload");
+        String buyer = String.valueOf(payload.getOrDefault("buyer", ""));
+        String side = buyer.equals(viewerParty) ? "buy" : "sell";
         return Map.<String, Object>of(
                 "id", String.valueOf(row.get("contractId")),
                 "price", parseDouble(payload.get("price")),
                 "quantity", parseDouble(payload.get("quantity")),
                 "executedAt", String.valueOf(payload.getOrDefault("executedAt", "")),
-                "buyer", String.valueOf(payload.getOrDefault("buyer", "")),
-                "seller", String.valueOf(payload.getOrDefault("seller", ""))
+                "side", side
         );
     }
 
