@@ -77,8 +77,10 @@ public class MatchingEngine {
                 Map<String, Object> sellPayload = (Map<String, Object>) sell.get("payload");
 
                 String buyBase = String.valueOf(buyPayload.get("baseAsset"));
+                String buyQuote = String.valueOf(buyPayload.get("quoteAsset"));
                 String sellBase = String.valueOf(sellPayload.get("baseAsset"));
-                if (!buyBase.equals(sellBase)) {
+                String sellQuote = String.valueOf(sellPayload.get("quoteAsset"));
+                if (!buyBase.equals(sellBase) || !buyQuote.equals(sellQuote)) {
                     si++;
                     continue;
                 }
