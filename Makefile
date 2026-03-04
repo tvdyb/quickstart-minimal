@@ -27,8 +27,8 @@ endif
 
 # Always resolve module paths from the current repo to avoid accidental
 # cross-repo environment leakage (e.g. exported MODULES_DIR/LOCALNET_DIR).
-override MODULES_DIR := $(shell pwd)/docker/modules
-override LOCALNET_DIR := $(MODULES_DIR)/localnet
+export MODULES_DIR := $(shell pwd)/docker/modules
+export LOCALNET_DIR := $(MODULES_DIR)/localnet
 
 # Print out info about paths:
 ifdef PATH_DEBUG_INFO
