@@ -1,0 +1,14 @@
+module Umbra.ActivityMarker where
+
+-- | Activity record for Canton Network reward tracking
+template ActivityRecord
+  with
+    operator : Party
+    user : Party
+    activityType : Text    -- e.g., "TRADE", "SUPPLY", "BORROW"
+    description : Text
+    timestamp : Time
+    rewardWeight : Decimal -- Relative weight for reward calculation
+  where
+    signatory operator
+    observer user

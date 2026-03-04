@@ -1,0 +1,24 @@
+module Umbra.Oracle where
+
+import Umbra.Types (Asset, Price)
+
+-- | Oracle price feed template
+template OraclePrice
+  with
+    oracle : Party
+    observers : [Party]
+    asset : Asset
+    price : Price
+    lastUpdated : Time
+  where
+    signatory oracle
+    observer observers
+
+    choice UpdatePrice : ContractId OraclePrice
+      with
+        newPrice : Price
+      controller oracle
+      do
+        now <- getTime
+        assertMsg "Price must be positive" (newPrice > 0.0)
+        create this with price = newPrice, lastUpdated = now

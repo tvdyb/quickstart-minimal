@@ -1,0 +1,177 @@
+module Umbra.Test where
+
+import Umbra.Types
+import Umbra.DarkPool
+import Umbra.Lending
+import Umbra.Oracle
+import DA.Time (time)
+import DA.Date (date, Month(..))
+import Daml.Script
+
+-- | Test dark pool order creation and matching
+testDarkPool : Script ()
+testDarkPool = script do
+  operator <- allocateParty "Operator"
+  alice <- allocateParty "Alice"
+  bob <- allocateParty "Bob"
+
+  -- Setup: create dark pool operator
+  poolOp <- submit operator do
+    createCmd DarkPoolOperator with operator
+
+  setTime (time (date 2026 Jan 15) 12 0 0)
+
+  -- Alice creates a buy order
+  buyOrder <- submitMulti [operator, alice] [] do
+    exerciseCmd poolOp CreateOrder with
+      trader = alice
+      baseAsset = "BTC"
+      quoteAsset = "USDC"
+      side = Buy
+      price = 50000.0
+      quantity = 1.0
+
+  -- Bob creates a sell order
+  sellOrder <- submitMulti [operator, bob] [] do
+    exerciseCmd poolOp CreateOrder with
+      trader = bob
+      baseAsset = "BTC"
+      quoteAsset = "USDC"
+      side = Sell
+      price = 50000.0
+      quantity = 1.0
+
+  -- Operator matches: fill Alice's buy (operator is controller of FillOrder)
+  (_, _) <- submit operator do
+    exerciseCmd buyOrder FillOrder with
+      fillPrice = 50000.0
+      counterparty = bob
+
+  -- Fill Bob's sell
+  (_, _) <- submit operator do
+    exerciseCmd sellOrder FillOrder with
+      fillPrice = 50000.0
+      counterparty = alice
+
+  -- Cancel test
+  cancelOrder <- submitMulti [operator, alice] [] do
+    exerciseCmd poolOp CreateOrder with
+      trader = alice
+      baseAsset = "ETH"
+      quoteAsset = "USDC"
+      side = Buy
+      price = 3000.0
+      quantity = 10.0
+
+  submit alice do
+    exerciseCmd cancelOrder CancelOrder
+
+  return ()
+
+-- | Test lending pool operations
+testLending : Script ()
+testLending = script do
+  operator <- allocateParty "Operator"
+  alice <- allocateParty "Alice"
+  bob <- allocateParty "Bob"
+  oracle <- allocateParty "Oracle"
+
+  let startTime = time (date 2026 Jan 15) 12 0 0
+  setTime startTime
+
+  -- Create oracle prices with operator as observer so lending pool can read them
+  usdcOracle <- submit oracle do
+    createCmd OraclePrice with
+      oracle
+      observers = [operator, alice, bob]
+      asset = "USDC"
+      price = 1.0
+      lastUpdated = startTime
+
+  ccOracle <- submit oracle do
+    createCmd OraclePrice with
+      oracle
+      observers = [operator, alice, bob]
+      asset = "CC"
+      price = 10.0
+      lastUpdated = startTime
+
+  let rateModel = RateModelParams with
+        baseRate = 0.02
+        multiplier = 0.1
+        jumpMultiplier = 3.0
+        kink = 0.80
+
+  pool <- submit operator do
+    createCmd LendingPool with
+      operator
+      asset = "USDC"
+      totalSupply = 0.0
+      totalBorrows = 0.0
+      rateModel
+      collateralConfig = defaultCCCollateral
+      lastUpdateTime = startTime
+      accumulatedIndex = 1.0
+
+  -- Alice supplies 10000 USDC
+  (pool2, _, _) <- submitMulti [operator, alice] [] do
+    exerciseCmd pool Supply with
+      supplier = alice
+      amount = 10000.0
+
+  -- Bob borrows 1000 USDC with 200 CC collateral
+  (pool3, borrowPos, _) <- submitMulti [operator, bob] [] do
+    exerciseCmd pool2 Borrow with
+      borrower = bob
+      borrowAmount = 1000.0
+      collateralAmount = 200.0
+      oracleCid = usdcOracle
+      collateralOracleCid = ccOracle
+
+  -- Check health factor
+  hf <- submit operator do
+    exerciseCmd borrowPos GetHealthFactor with
+      borrowOracleCid = usdcOracle
+      collateralOracleCid = ccOracle
+      currentIndex = 1.0
+
+  assertMsg "Health factor should be > 1" (hf > 1.0)
+
+  -- Accrue interest
+  let nextDay = time (date 2026 Jan 16) 12 0 0
+  setTime nextDay
+
+  _pool4 <- submit operator do
+    exerciseCmd pool3 AccrueInterest
+
+  -- Bob repays
+  submitMulti [operator, bob] [] do
+    exerciseCmd borrowPos Repay with
+      repayAmount = 1000.0
+
+  return ()
+
+-- | Test oracle price updates
+testOracle : Script ()
+testOracle = script do
+  oracle <- allocateParty "Oracle"
+
+  let startTime = time (date 2026 Jan 15) 12 0 0
+  setTime startTime
+
+  priceCid <- submit oracle do
+    createCmd OraclePrice with
+      oracle
+      observers = []
+      asset = "BTC"
+      price = 50000.0
+      lastUpdated = startTime
+
+  let nextTime = time (date 2026 Jan 15) 13 0 0
+  setTime nextTime
+
+  _newPriceCid <- submit oracle do
+    exerciseCmd priceCid UpdatePrice with
+      newPrice = 51000.0
+
+  return ()

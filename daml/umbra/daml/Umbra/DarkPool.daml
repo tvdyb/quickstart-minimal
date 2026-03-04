@@ -1,0 +1,98 @@
+module Umbra.DarkPool where
+
+import Umbra.Types
+import Umbra.ActivityMarker (ActivityRecord(..))
+
+-- | Dark pool operator template - authorizes the operator to run the pool
+template DarkPoolOperator
+  with
+    operator : Party
+  where
+    signatory operator
+
+    nonconsuming choice CreateOrder : ContractId SpotOrder
+      with
+        trader : Party
+        baseAsset : Asset
+        quoteAsset : Asset
+        side : Side
+        price : Price
+        quantity : Quantity
+      controller operator, trader
+      do
+        now <- getTime
+        assertMsg "Price must be positive" (price > 0.0)
+        assertMsg "Quantity must be positive" (quantity > 0.0)
+        create SpotOrder with
+          operator
+          trader
+          baseAsset
+          quoteAsset
+          side
+          price
+          quantity
+          status = Open
+          createdAt = now
+
+-- | Spot order in the dark pool
+template SpotOrder
+  with
+    operator : Party
+    trader : Party
+    baseAsset : Asset
+    quoteAsset : Asset
+    side : Side
+    price : Price
+    quantity : Quantity
+    status : OrderStatus
+    createdAt : Time
+  where
+    signatory operator, trader
+
+    choice CancelOrder : ContractId SpotOrder
+      controller trader
+      do
+        assertMsg "Order must be Open to cancel" (status == Open)
+        create this with status = Cancelled
+
+    choice FillOrder : (ContractId TradeConfirm, ContractId ActivityRecord)
+      with
+        fillPrice : Price
+        counterparty : Party
+      controller operator
+      do
+        now <- getTime
+        assertMsg "Order must be Open to fill" (status == Open)
+        assertMsg "Fill price must be positive" (fillPrice > 0.0)
+        confirm <- create TradeConfirm with
+          operator
+          buyer = if side == Buy then trader else counterparty
+          seller = if side == Sell then trader else counterparty
+          baseAsset
+          quoteAsset
+          price = fillPrice
+          quantity
+          executedAt = now
+        activity <- create ActivityRecord with
+          operator
+          user = trader
+          activityType = "TRADE"
+          description = "Dark pool trade: " <> show quantity <> " " <> baseAsset <> "/" <> quoteAsset
+          timestamp = now
+          rewardWeight = quantity * fillPrice
+        return (confirm, activity)
+
+-- | Trade confirmation
+template TradeConfirm
+  with
+    operator : Party
+    buyer : Party
+    seller : Party
+    baseAsset : Asset
+    quoteAsset : Asset
+    price : Price
+    quantity : Quantity
+    executedAt : Time
+  where
+    signatory operator
+    observer buyer, seller

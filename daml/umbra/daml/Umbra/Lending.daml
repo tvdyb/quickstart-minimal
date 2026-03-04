@@ -1,0 +1,225 @@
+module Umbra.Lending where
+
+import Umbra.Types
+import Umbra.Oracle (OraclePrice(..))
+import Umbra.ActivityMarker (ActivityRecord(..))
+import DA.Time (RelTime, subTime, convertRelTimeToMicroseconds)
+
+-- | Lending pool template
+template LendingPool
+  with
+    operator : Party
+    asset : Asset
+    totalSupply : Decimal
+    totalBorrows : Decimal
+    rateModel : RateModelParams
+    collateralConfig : CollateralConfig
+    lastUpdateTime : Time
+    accumulatedIndex : Decimal  -- Accumulated interest index
+  where
+    signatory operator
+
+    -- | Calculate utilization rate
+    nonconsuming choice GetUtilization : Decimal
+      controller operator
+      do
+        if totalSupply == 0.0
+          then return 0.0
+          else return (totalBorrows / totalSupply)
+
+    -- | Calculate borrow rate based on kink model
+    nonconsuming choice GetBorrowRate : Decimal
+      controller operator
+      do
+        let utilization = if totalSupply == 0.0 then 0.0 else totalBorrows / totalSupply
+        if utilization <= rateModel.kink
+          then return (rateModel.baseRate + utilization * rateModel.multiplier)
+          else do
+            let normalRate = rateModel.baseRate + rateModel.kink * rateModel.multiplier
+            let excessUtil = utilization - rateModel.kink
+            return (normalRate + excessUtil * rateModel.jumpMultiplier)
+
+    -- | Accrue interest
+    choice AccrueInterest : ContractId LendingPool
+      controller operator
+      do
+        now <- getTime
+        let elapsed = subTime now lastUpdateTime
+        let elapsedMicros = convertRelTimeToMicroseconds elapsed
+        let elapsedSeconds = intToDecimal elapsedMicros / 1000000.0
+        let secondsPerYear = 31536000.0
+        let utilization = if totalSupply == 0.0 then 0.0 else totalBorrows / totalSupply
+        let borrowRate =
+              if utilization <= rateModel.kink
+                then rateModel.baseRate + utilization * rateModel.multiplier
+                else
+                  let normalRate = rateModel.baseRate + rateModel.kink * rateModel.multiplier
+                      excessUtil = utilization - rateModel.kink
+                  in normalRate + excessUtil * rateModel.jumpMultiplier
+        let interestFactor = borrowRate * elapsedSeconds / secondsPerYear
+        let newBorrows = totalBorrows * (1.0 + interestFactor)
+        let newIndex = accumulatedIndex * (1.0 + interestFactor)
+        create this with
+          totalBorrows = newBorrows
+          accumulatedIndex = newIndex
+          lastUpdateTime = now
+
+    -- | Supply assets to the pool
+    choice Supply : (ContractId LendingPool, ContractId SupplyPosition, ContractId ActivityRecord)
+      with
+        supplier : Party
+        amount : Decimal
+      controller operator, supplier
+      do
+        now <- getTime
+        assertMsg "Supply amount must be positive" (amount > 0.0)
+        newPool <- create this with totalSupply = totalSupply + amount
+        position <- create SupplyPosition with
+          operator
+          supplier
+          asset
+          amount
+          entryIndex = accumulatedIndex
+          createdAt = now
+        activity <- create ActivityRecord with
+          operator
+          user = supplier
+          activityType = "SUPPLY"
+          description = "Supplied " <> show amount <> " " <> asset
+          timestamp = now
+          rewardWeight = amount
+        return (newPool, position, activity)
+
+    -- | Borrow assets from the pool
+    choice Borrow : (ContractId LendingPool, ContractId BorrowPosition, ContractId ActivityRecord)
+      with
+        borrower : Party
+        borrowAmount : Decimal
+        collateralAmount : Decimal
+        oracleCid : ContractId OraclePrice
+        collateralOracleCid : ContractId OraclePrice
+      controller operator, borrower
+      do
+        now <- getTime
+        assertMsg "Borrow amount must be positive" (borrowAmount > 0.0)
+        assertMsg "Collateral amount must be positive" (collateralAmount > 0.0)
+        -- Check collateral value vs borrow value
+        borrowOracle <- fetch oracleCid
+        collateralOracle <- fetch collateralOracleCid
+        let borrowValue = borrowAmount * borrowOracle.price
+        let collateralValue = collateralAmount * collateralOracle.price
+        let maxBorrow = collateralValue * collateralConfig.ltvRatio
+        assertMsg "Insufficient collateral" (borrowValue <= maxBorrow)
+        assertMsg "Insufficient pool liquidity" (borrowAmount <= totalSupply - totalBorrows)
+        newPool <- create this with totalBorrows = totalBorrows + borrowAmount
+        position <- create BorrowPosition with
+          operator
+          borrower
+          borrowAsset = asset
+          borrowAmount
+          collateralAsset = collateralConfig.asset
+          collateralAmount
+          entryIndex = accumulatedIndex
+          liquidationThreshold = collateralConfig.liquidationThreshold
+          createdAt = now
+        activity <- create ActivityRecord with
+          operator
+          user = borrower
+          activityType = "BORROW"
+          description = "Borrowed " <> show borrowAmount <> " " <> asset <> " with " <> show collateralAmount <> " " <> collateralConfig.asset <> " collateral"
+          timestamp = now
+          rewardWeight = borrowAmount
+        return (newPool, position, activity)
+
+-- | Supply position
+template SupplyPosition
+  with
+    operator : Party
+    supplier : Party
+    asset : Asset
+    amount : Decimal
+    entryIndex : Decimal
+    createdAt : Time
+  where
+    signatory operator, supplier
+
+    choice Withdraw : ()
+      with
+        poolCid : ContractId LendingPool
+      controller supplier
+      do
+        pool <- fetch poolCid
+        -- Calculate accrued interest
+        let growthFactor = pool.accumulatedIndex / entryIndex
+        let totalAmount = amount * growthFactor
+        -- In a real system, we'd transfer tokens here
+        return ()
+
+-- | Borrow position
+template BorrowPosition
+  with
+    operator : Party
+    borrower : Party
+    borrowAsset : Asset
+    borrowAmount : Decimal
+    collateralAsset : Asset
+    collateralAmount : Decimal
+    entryIndex : Decimal
+    liquidationThreshold : Decimal
+    createdAt : Time
+  where
+    signatory operator, borrower
+
+    -- | Get current health factor
+    nonconsuming choice GetHealthFactor : Decimal
+      with
+        borrowOracleCid : ContractId OraclePrice
+        collateralOracleCid : ContractId OraclePrice
+        currentIndex : Decimal
+      controller operator
+      do
+        borrowOracle <- fetch borrowOracleCid
+        collateralOracle <- fetch collateralOracleCid
+        let growthFactor = currentIndex / entryIndex
+        let currentDebt = borrowAmount * growthFactor
+        let debtValue = currentDebt * borrowOracle.price
+        let collateralValue = collateralAmount * collateralOracle.price
+        let liquidationValue = collateralValue * liquidationThreshold
+        if debtValue == 0.0
+          then return 999.0
+          else return (liquidationValue / debtValue)
+
+    -- | Repay borrow
+    choice Repay : ()
+      with
+        repayAmount : Decimal
+      controller borrower
+      do
+        assertMsg "Repay amount must cover debt" (repayAmount >= borrowAmount)
+        return ()
+
+    -- | Liquidate undercollateralized position
+    choice Liquidate : ContractId ActivityRecord
+      with
+        liquidator : Party
+        borrowOracleCid : ContractId OraclePrice
+        collateralOracleCid : ContractId OraclePrice
+        currentIndex : Decimal
+      controller operator
+      do
+        now <- getTime
+        borrowOracle <- fetch borrowOracleCid
+        collateralOracle <- fetch collateralOracleCid
+        let growthFactor = currentIndex / entryIndex
+        let currentDebt = borrowAmount * growthFactor
+        let debtValue = currentDebt * borrowOracle.price
+        let collateralValue = collateralAmount * collateralOracle.price
+        let healthFactor = (collateralValue * liquidationThreshold) / debtValue
+        assertMsg "Position is not liquidatable (health factor >= 1)" (healthFactor < 1.0)
+        create ActivityRecord with
+          operator
+          user = liquidator
+          activityType = "LIQUIDATE"
+          description = "Liquidated position: " <> show currentDebt <> " " <> borrowAsset
+          timestamp = now
+          rewardWeight = debtValue

@@ -1,0 +1,14 @@
+# For Dockerfile.builder - exclude heavy/unnecessary dirs
+.git
+*.log
+logs/
+node_modules/
+frontend/node_modules/
+frontend/dist/
+backend/build/
+daml/**/.daml/
+daml/.sdk/
+.gradle/
+build/
+integration-test/node_modules/
+integration-test/test-results/
