@@ -294,6 +294,9 @@ reset-stack: ## Force-clean quickstart containers/network and stop compose stack
 	-docker rm -f loki tempo prometheus grafana nginx backend-service pqs-app-provider splice-onboarding splice canton keycloak nginx-keycloak postgres wallet-web-ui-sv wallet-web-ui-app-user wallet-web-ui-app-provider ans-web-ui-app-provider ans-web-ui-app-user sv-web-ui scan-web-ui nginx-metrics postgres-metrics swagger-ui otel-collector cadvisor 2>/dev/null || true
 	-docker network rm quickstart 2>/dev/null || true
 
+.PHONY: fresh-start
+fresh-start: reset-stack start ## Clean the stack and start from scratch
+
 .PHONY: stop-application
 stop-application: docker-available ## Stop the application, leaving observability services running
 	$(call docker-compose, down)

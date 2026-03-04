@@ -21,6 +21,7 @@ const TradePage: React.FC = () => {
 
   useEffect(() => {
     const load = async () => {
+      setLoadError(null);
       try {
         const mine = await getMyOrders();
         setMyOrders(Array.isArray(mine) ? mine : []);
@@ -32,7 +33,8 @@ const TradePage: React.FC = () => {
 
       if (trader) {
         try {
-          setTrades(await getMyTrades());
+          const nextTrades = await getMyTrades();
+          setTrades(Array.isArray(nextTrades) ? nextTrades : []);
         } catch (e: any) {
           console.error(e);
           const msg = e?.response?.data?.error || e?.message || 'Failed to load trades';
