@@ -148,6 +148,10 @@ sourceSets {
                 "$projectDir/build/generated-token-standard-openapi/src/main/java",
                 "$projectDir/build/generated-daml-bindings" // TODO: remove this line once daml plugin is used
             )
+            // DAML Java codegen 3.4.10 emits an inconsistent daml-prim Tuple2 binding:
+            // Tuple2.java references Identifiers.DA_Types__Tuple2 which is not generated.
+            // Exclude this unused class to keep backend compilation deterministic.
+            exclude("daml_prim_da_types/da/types/Tuple2.java")
         }
     }
     test {

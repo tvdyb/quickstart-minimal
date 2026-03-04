@@ -91,13 +91,21 @@ public class MatchingEngine {
                 String buyer = String.valueOf(buyPayload.get("trader"));
                 String seller = String.valueOf(sellPayload.get("trader"));
                 String operator = config.getOperatorParty();
+                double matchQuantity = Math.min(getQuantity(buy), getQuantity(sell));
+                if (matchQuantity <= 0.0) {
+                    logger.warn("Skipping invalid match with non-positive quantity: buy={} sell={}", buyContractId, sellContractId);
+                    bi++;
+                    si++;
+                    continue;
+                }
 
-                logger.info("Matching orders: buy={} sell={} at midPrice={}", buyContractId, sellContractId, midPrice);
+                logger.info("Matching orders: buy={} sell={} at midPrice={} quantity={}", buyContractId, sellContractId, midPrice, matchQuantity);
 
                 try {
                     // Fill the buy order
                     ValueOuterClass.Value fillBuyArg = recordVal(
                             field("fillPrice", numericVal(midPrice)),
+                            field("fillQuantity", numericVal(matchQuantity)),
                             field("counterparty", partyVal(seller))
                     );
                     ledger.exerciseChoice(
@@ -111,6 +119,7 @@ public class MatchingEngine {
                     // Fill the sell order
                     ValueOuterClass.Value fillSellArg = recordVal(
                             field("fillPrice", numericVal(midPrice)),
+                            field("fillQuantity", numericVal(matchQuantity)),
                             field("counterparty", partyVal(buyer))
                     );
                     ledger.exerciseChoice(
@@ -138,5 +147,11 @@ public class MatchingEngine {
         @SuppressWarnings("unchecked")
         Map<String, Object> payload = (Map<String, Object>) order.get("payload");
         return Double.parseDouble(String.valueOf(payload.get("price")));
+    }
+
+    private double getQuantity(Map<String, Object> order) {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> payload = (Map<String, Object>) order.get("payload");
+        return Double.parseDouble(String.valueOf(payload.get("quantity")));
     }
 }
