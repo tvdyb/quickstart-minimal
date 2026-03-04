@@ -80,6 +80,16 @@ public class UmbraController {
                     ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Trader party not found"))
             );
         }
+        if (price <= 0.0) {
+            return CompletableFuture.completedFuture(
+                    ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Price must be positive"))
+            );
+        }
+        if (quantity <= 0.0) {
+            return CompletableFuture.completedFuture(
+                    ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Quantity must be positive"))
+            );
+        }
 
         // Exercise CreateOrder on the DarkPoolOperator
         return repo.getDarkPoolOperator()
@@ -232,6 +242,11 @@ public class UmbraController {
                     ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Supplier party not found"))
             );
         }
+        if (amount <= 0.0) {
+            return CompletableFuture.completedFuture(
+                    ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Supply amount must be positive"))
+            );
+        }
         final String supplierParty = supplier;
         final double supplyAmount = amount;
 
@@ -296,6 +311,16 @@ public class UmbraController {
         if (borrower == null || borrower.isBlank()) {
             return CompletableFuture.completedFuture(
                     ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Borrower party not found"))
+            );
+        }
+        if (borrowAmount <= 0.0) {
+            return CompletableFuture.completedFuture(
+                    ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Borrow amount must be positive"))
+            );
+        }
+        if (collateralAmount <= 0.0) {
+            return CompletableFuture.completedFuture(
+                    ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Collateral amount must be positive"))
             );
         }
         if (oracleCid == null || collateralOracleCid == null) {
@@ -368,6 +393,11 @@ public class UmbraController {
         if (contractId == null || contractId.isBlank()) {
             return CompletableFuture.completedFuture(
                     ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Position contract id is required"))
+            );
+        }
+        if (repayAmount <= 0.0) {
+            return CompletableFuture.completedFuture(
+                    ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Repay amount must be positive"))
             );
         }
         final String borrowerParty = borrower;
