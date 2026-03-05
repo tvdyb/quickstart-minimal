@@ -102,32 +102,32 @@ public class MatchingEngine {
                 logger.info("Matching orders: buy={} sell={} at midPrice={} quantity={}", buyContractId, sellContractId, midPrice, matchQuantity);
 
                 try {
-                    // Fill the buy order
+                    // Fill the buy order (controller = operator + counterparty seller)
                     ValueOuterClass.Value fillBuyArg = recordVal(
                             field("fillPrice", numericVal(midPrice)),
                             field("fillQuantity", numericVal(matchQuantity)),
                             field("counterparty", partyVal(seller))
                     );
-                    ledger.exerciseChoice(
+                    ledger.exerciseChoiceMulti(
                             buyContractId,
                             "Umbra.DarkPool", "SpotOrder",
                             "FillOrder",
                             fillBuyArg,
-                            operator
+                            List.of(operator, seller)
                     ).get(); // blocking - sequential matching is simpler
 
-                    // Fill the sell order
+                    // Fill the sell order (controller = operator + counterparty buyer)
                     ValueOuterClass.Value fillSellArg = recordVal(
                             field("fillPrice", numericVal(midPrice)),
                             field("fillQuantity", numericVal(matchQuantity)),
                             field("counterparty", partyVal(buyer))
                     );
-                    ledger.exerciseChoice(
+                    ledger.exerciseChoiceMulti(
                             sellContractId,
                             "Umbra.DarkPool", "SpotOrder",
                             "FillOrder",
                             fillSellArg,
-                            operator
+                            List.of(operator, buyer)
                     ).get();
 
                     logger.info("Matched: {} buys from {} at {}", buyBase, seller, midPrice);
