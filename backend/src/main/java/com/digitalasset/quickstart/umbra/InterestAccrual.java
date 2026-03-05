@@ -59,11 +59,11 @@ public class InterestAccrual {
                     operator
             ).thenAccept(tx -> logger.debug("Accrued interest (tx: {})", tx.getUpdateId()))
              .exceptionally(e -> {
-                 logger.error("Failed to accrue interest", e);
+                 logger.warn("Failed to accrue interest", e);
                  return null;
              });
         } catch (Exception e) {
-            logger.debug("Interest accrual error (may be normal if no pool exists)", e);
+            logger.warn("Interest accrual error (may be normal if no pool exists)", e);
         }
     }
 }

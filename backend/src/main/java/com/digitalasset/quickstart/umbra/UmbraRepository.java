@@ -1,7 +1,7 @@
 package com.digitalasset.quickstart.umbra;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,7 +21,8 @@ public class UmbraRepository {
 
     private static final Logger logger = LoggerFactory.getLogger(UmbraRepository.class);
     private final JdbcTemplate jdbc;
-    private final ObjectMapper mapper = new ObjectMapper();
+    // ObjectReader is thread-safe, unlike ObjectMapper for read operations with shared config
+    private static final ObjectReader mapReader = new ObjectMapper().readerFor(Map.class);
 
     @Autowired
     public UmbraRepository(JdbcTemplate jdbc) {
@@ -275,6 +276,24 @@ public class UmbraRepository {
         }
     }
 
+    // ── ProtocolPause ─────────────────────────────────────
+
+    public Optional<Map<String, Object>> getProtocolPause() {
+        String sql = "SELECT contract_id, payload FROM active(?) LIMIT 1";
+        try {
+            List<Map<String, Object>> results = jdbc.query(sql, (rs, i) -> {
+                Map<String, Object> row = new HashMap<>();
+                row.put("contractId", rs.getString("contract_id"));
+                row.put("payload", parseJson(rs.getString("payload")));
+                return row;
+            }, PROTOCOL_PAUSE_TEMPLATE);
+            return results.isEmpty() ? Optional.empty() : Optional.of(results.get(0));
+        } catch (Exception e) {
+            logger.debug("ProtocolPause template not yet available in PQS", e);
+            return Optional.empty();
+        }
+    }
+
     // ── DarkPoolOperator ───────────────────────────────────
 
     /**
@@ -299,7 +318,7 @@ public class UmbraRepository {
     @SuppressWarnings("unchecked")
     private Map<String, Object> parseJson(String json) {
         try {
-            return mapper.readValue(json, Map.class);
+            return mapReader.readValue(json);
         } catch (Exception e) {
             logger.error("Failed to parse JSON payload", e);
             return Map.of();

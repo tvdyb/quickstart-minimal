@@ -15,15 +15,8 @@ import static com.digitalasset.quickstart.umbra.ProtoHelper.*;
 /**
  * Oracle price service. Updates CC/USD price every 5 minutes.
  *
- * ⚠️ WARNING: MOCK MODE - DO NOT USE IN PRODUCTION ⚠️
- *
- * This service generates RANDOM PRICES for development/testing only.
- * In production, this MUST be replaced with:
- * - Real market data feeds (Chainlink, RedStone, etc.)
- * - Multi-oracle aggregation (median of 3+ sources)
- * - Price bounds validation (implemented in DAML OraclePrice template)
- *
- * For DevNet MVP: mock price fluctuating around $0.16 +/- $0.01.
+ * WARNING: MOCK MODE generates random prices for development/testing only.
+ * In production, set umbra.oracle.mock-mode=false and replace with real market data feeds.
  */
 @Component
 public class OraclePriceService {
@@ -32,9 +25,8 @@ public class OraclePriceService {
     private static final double BASE_PRICE = 0.16;
     private static final double PRICE_VARIANCE = 0.01;
 
-    // TODO: Add production mode flag that disables mock prices
-    // @Value("${umbra.oracle.mockMode:true}")
-    // private boolean mockMode;
+    @org.springframework.beans.factory.annotation.Value("${umbra.oracle.mock-mode:true}")
+    private boolean mockMode;
 
     private final UmbraRepository repo;
     private final UmbraLedgerClient ledger;
@@ -49,6 +41,11 @@ public class OraclePriceService {
 
     @Scheduled(fixedRate = 300_000) // 5 minutes
     public void updatePrice() {
+        if (!mockMode) {
+            logger.debug("Oracle mock mode disabled, skipping price update");
+            return;
+        }
+
         String oracleParty = config.getOracleParty();
         if (oracleParty.isEmpty()) return;
 
@@ -78,7 +75,7 @@ public class OraclePriceService {
                  return null;
              });
         } catch (Exception e) {
-            logger.debug("Oracle price update error (may be normal if no contracts exist)", e);
+            logger.warn("Oracle price update error", e);
         }
     }
 }

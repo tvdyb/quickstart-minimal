@@ -3,14 +3,12 @@
 
 server:
   forward-headers-strategy: NATIVE
-  # Review Error settings here and set acceptable values for production use.
-  # This configuration is for development purposes.
   error:
-    include-message: always
-    include-binding-errors: always
-    include-stacktrace: always
-    include-path: always
-    include-exception: true
+    include-message: on_param
+    include-binding-errors: never
+    include-stacktrace: never
+    include-path: on_param
+    include-exception: false
   port: ${BACKEND_PORT}
 
 logging:
@@ -45,4 +43,6 @@ application:
 umbra:
   operator-party: ${UMBRA_OPERATOR_PARTY:${APP_PROVIDER_PARTY}}
   oracle-party: ${UMBRA_ORACLE_PARTY:${APP_PROVIDER_PARTY}}
-  package-id: ${UMBRA_PACKAGE_ID:umbra-protocol}
+  package-id: "${UMBRA_PACKAGE_ID:#umbra-protocol}"
+  oracle:
+    mock-mode: ${UMBRA_ORACLE_MOCK_MODE:true}

@@ -22,14 +22,13 @@ const TradePage: React.FC = () => {
 
   useEffect(() => {
     const load = async () => {
-      setLoadError(null);
+      const errors: string[] = [];
       try {
         const mine = await getMyOrders();
         setMyOrders(Array.isArray(mine) ? mine : []);
       } catch (e: any) {
         console.error(e);
-        const msg = e?.response?.data?.error || e?.message || 'Failed to load orders';
-        setLoadError(msg);
+        errors.push(e?.response?.data?.error || e?.message || 'Failed to load orders');
       }
 
       if (trader) {
@@ -38,10 +37,10 @@ const TradePage: React.FC = () => {
           setTrades(Array.isArray(nextTrades) ? nextTrades : []);
         } catch (e: any) {
           console.error(e);
-          const msg = e?.response?.data?.error || e?.message || 'Failed to load trades';
-          setLoadError(msg);
+          errors.push(e?.response?.data?.error || e?.message || 'Failed to load trades');
         }
       }
+      setLoadError(errors.length > 0 ? errors.join('; ') : null);
     };
     void load();
     const iv = setInterval(load, 2500);

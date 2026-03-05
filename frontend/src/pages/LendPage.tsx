@@ -23,19 +23,19 @@ const LendPage: React.FC = () => {
 
   useEffect(() => {
     const load = async () => {
-      setLoadError(null);
+      const errors: string[] = [];
       try {
         setPool(await getPool());
       } catch (e: any) {
         console.error(e);
-        setLoadError(e?.response?.data?.error || e?.message || 'Failed to load pool');
+        errors.push(e?.response?.data?.error || e?.message || 'Failed to load pool');
       }
       try {
         const o = await getOracle();
         setCcPrice(o.ccPrice || o.price || 100);
       } catch (e: any) {
         console.error(e);
-        setLoadError(e?.response?.data?.error || e?.message || 'Failed to load oracle');
+        errors.push(e?.response?.data?.error || e?.message || 'Failed to load oracle');
       }
       if (trader) {
         try {
@@ -47,9 +47,10 @@ const LendPage: React.FC = () => {
           setPositions(merged);
         } catch (e: any) {
           console.error(e);
-          setLoadError(e?.response?.data?.error || e?.message || 'Failed to load positions');
+          errors.push(e?.response?.data?.error || e?.message || 'Failed to load positions');
         }
       }
+      setLoadError(errors.length > 0 ? errors.join('; ') : null);
     };
     void load();
     const iv = setInterval(load, 3000);

@@ -1,5 +1,6 @@
 package com.digitalasset.quickstart.umbra;
 
+import com.daml.ledger.api.v2.TransactionOuterClass;
 import com.daml.ledger.api.v2.ValueOuterClass;
 import com.digitalasset.quickstart.security.AuthenticatedPartyProvider;
 import io.grpc.Status;
@@ -40,6 +41,168 @@ public class UmbraController {
         this.ledger = ledger;
         this.config = config;
         this.authenticatedPartyProvider = authenticatedPartyProvider;
+    }
+
+    // ── Bootstrap ─────────────────────────────────────────
+
+    /**
+     * POST /api/umbra/bootstrap → Initialize all Umbra contracts on the ledger.
+     * Creates ProtocolPause, DarkPoolOperator, OraclePrice (USDC + CC), and LendingPool.
+     * Idempotent: skips contracts that already exist.
+     */
+    @PostMapping("/umbra/bootstrap")
+    public ResponseEntity<Map<String, Object>> bootstrap() {
+        String operator = config.getOperatorParty();
+        if (operator == null || operator.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "umbra.operator-party not configured"));
+        }
+
+        String oracleParty = config.getOracleParty();
+        if (oracleParty == null || oracleParty.isBlank()) {
+            oracleParty = operator;
+        }
+
+        Map<String, String> created = new LinkedHashMap<>();
+        List<String> skipped = new ArrayList<>();
+
+        try {
+            // 1. ProtocolPause
+            String pauseContractId = null;
+            var existingPause = pqsSafe(() -> repo.getProtocolPause());
+            if (existingPause.isEmpty()) {
+                var tx = ledger.createContractAndWait("Umbra.Types", "ProtocolPause", record(
+                        field("operator", partyVal(operator)),
+                        field("isPaused", boolVal(false)),
+                        field("reason", textVal("")),
+                        field("pausedAt", optionalNone())
+                ), operator).get();
+                pauseContractId = extractCreatedContractId(tx);
+                created.put("ProtocolPause", "created");
+            } else {
+                pauseContractId = (String) existingPause.get().get("contractId");
+                skipped.add("ProtocolPause");
+            }
+
+            // 2. DarkPoolOperator (needs pauseCid)
+            if (pqsSafe(() -> repo.getDarkPoolOperator()).isEmpty()) {
+                if (pauseContractId != null) {
+                    ledger.createContract("Umbra.DarkPool", "DarkPoolOperator", record(
+                            field("operator", partyVal(operator)),
+                            field("pauseCid", contractIdVal(pauseContractId))
+                    ), operator).get();
+                    created.put("DarkPoolOperator", "created");
+                } else {
+                    created.put("DarkPoolOperator", "FAILED - no ProtocolPause");
+                }
+            } else {
+                skipped.add("DarkPoolOperator");
+            }
+
+            // 3. OraclePrice for USDC
+            if (pqsSafe(() -> repo.getOraclePrice("USDC")).isEmpty()) {
+                ledger.createContract("Umbra.Oracle", "OraclePrice", record(
+                        field("oracle", partyVal(oracleParty)),
+                        field("observers", listVal(partyVal(operator))),
+                        field("asset", textVal("USDC")),
+                        field("price", numericVal(1.0)),
+                        field("lastUpdated", timestampVal(System.currentTimeMillis() * 1000)),
+                        field("minPrice", numericVal(0.90)),
+                        field("maxPrice", numericVal(1.10)),
+                        field("maxChangePercent", numericVal(0.1))
+                ), oracleParty).get();
+                created.put("OraclePrice:USDC", "created");
+            } else {
+                skipped.add("OraclePrice:USDC");
+            }
+
+            // 4. OraclePrice for CC
+            if (pqsSafe(() -> repo.getOraclePrice("CC")).isEmpty()) {
+                ledger.createContract("Umbra.Oracle", "OraclePrice", record(
+                        field("oracle", partyVal(oracleParty)),
+                        field("observers", listVal(partyVal(operator))),
+                        field("asset", textVal("CC")),
+                        field("price", numericVal(0.16)),
+                        field("lastUpdated", timestampVal(System.currentTimeMillis() * 1000)),
+                        field("minPrice", numericVal(0.01)),
+                        field("maxPrice", numericVal(100.0)),
+                        field("maxChangePercent", numericVal(0.5))
+                ), oracleParty).get();
+                created.put("OraclePrice:CC", "created");
+            } else {
+                skipped.add("OraclePrice:CC");
+            }
+
+            // 5. LendingPool (needs pauseCid)
+            if (pqsSafe(() -> repo.getLendingPool()).isEmpty()) {
+                if (pauseContractId != null) {
+                    String pauseCid = pauseContractId;
+                    ledger.createContract("Umbra.Lending", "LendingPool", record(
+                            field("operator", partyVal(operator)),
+                            field("asset", textVal("USDC")),
+                            field("totalSupply", numericVal(0.0)),
+                            field("totalBorrows", numericVal(0.0)),
+                            field("reserves", numericVal(0.0)),
+                            field("reserveFactor", numericVal(0.10)),
+                            field("borrowCap", optionalVal(numericVal(100000.0))),
+                            field("rateModel", recordVal(
+                                    field("baseRate", numericVal(0.02)),
+                                    field("multiplier", numericVal(0.1)),
+                                    field("jumpMultiplier", numericVal(3.0)),
+                                    field("kink", numericVal(0.80))
+                            )),
+                            field("collateralConfig", recordVal(
+                                    field("asset", textVal("CC")),
+                                    field("ltvRatio", numericVal(0.55)),
+                                    field("liquidationThreshold", numericVal(0.65)),
+                                    field("liquidationBonus", numericVal(0.05)),
+                                    field("closeFactor", numericVal(0.50)),
+                                    field("oracleMaxAgeSeconds", numericVal(3600.0))
+                            )),
+                            field("lastUpdateTime", timestampVal(System.currentTimeMillis() * 1000)),
+                            field("accumulatedIndex", numericVal(1.0)),
+                            field("pauseCid", contractIdVal(pauseCid))
+                    ), operator).get();
+                    created.put("LendingPool", "created");
+                } else {
+                    created.put("LendingPool", "FAILED - no ProtocolPause");
+                }
+            } else {
+                skipped.add("LendingPool");
+            }
+
+            return ResponseEntity.ok(Map.of(
+                    "status", "bootstrap complete",
+                    "created", created,
+                    "skipped", skipped
+            ));
+        } catch (Exception e) {
+            logger.error("Bootstrap failed", e);
+            return ResponseEntity.internalServerError().body(Map.of(
+                    "error", "Bootstrap failed",
+                    "created", created,
+                    "skipped", skipped
+            ));
+        }
+    }
+
+    /** Extract the first created contract ID from a transaction. */
+    private String extractCreatedContractId(TransactionOuterClass.Transaction tx) {
+        for (var event : tx.getEventsList()) {
+            if (event.hasCreated()) {
+                return event.getCreated().getContractId();
+            }
+        }
+        return null;
+    }
+
+    /** PQS query that returns Optional.empty() if the template is not yet registered in PQS. */
+    private <T> Optional<T> pqsSafe(java.util.function.Supplier<Optional<T>> query) {
+        try {
+            return query.get();
+        } catch (Exception e) {
+            logger.debug("PQS query not yet available (expected during bootstrap): {}", e.getMessage());
+            return Optional.empty();
+        }
     }
 
     // ── Dark Pool Endpoints ────────────────────────────────
@@ -232,7 +395,7 @@ public class UmbraController {
                     .orElse(ResponseEntity.ok(Map.<String, Object>of("error", "No lending pool found")));
         } catch (Exception e) {
             logger.error("Failed to get pool", e);
-            return ResponseEntity.internalServerError().body(Map.<String, Object>of("error", e.getMessage()));
+            return ResponseEntity.internalServerError().body(Map.<String, Object>of("error", "Failed to load pool"));
         }
     }
 
@@ -289,14 +452,16 @@ public class UmbraController {
         // ✅ DECENTRALIZED: No operator session required!
         String borrower = authenticatedPartyProvider.getPartyOrFail();
 
-        double borrowAmount = parseDouble(body.get("borrowAmount"));
-        if (borrowAmount == 0.0) {
-            borrowAmount = parseDouble(body.get("amount"));
+        double borrowAmountRaw = parseDouble(body.get("borrowAmount"));
+        if (borrowAmountRaw <= 0.0 && body.get("borrowAmount") == null) {
+            borrowAmountRaw = parseDouble(body.get("amount"));
         }
-        double collateralAmount = parseDouble(body.get("collateralAmount"));
-        if (collateralAmount == 0.0) {
-            collateralAmount = parseDouble(body.get("collateral"));
+        double collateralAmountRaw = parseDouble(body.get("collateralAmount"));
+        if (collateralAmountRaw <= 0.0 && body.get("collateralAmount") == null) {
+            collateralAmountRaw = parseDouble(body.get("collateral"));
         }
+        final double borrowAmount = borrowAmountRaw;
+        final double collateralAmount = collateralAmountRaw;
 
         String oracleCid = body.get("oracleCid") == null ? null : String.valueOf(body.get("oracleCid"));
         String collateralOracleCid = body.get("collateralOracleCid") == null ? null : String.valueOf(body.get("collateralOracleCid"));
@@ -368,10 +533,11 @@ public class UmbraController {
         String contractId = body.get("contractId") == null
                 ? String.valueOf(body.getOrDefault("positionId", ""))
                 : String.valueOf(body.get("contractId"));
-        double repayAmount = parseDouble(body.get("repayAmount"));
-        if (repayAmount == 0.0) {
-            repayAmount = parseDouble(body.get("amount"));
+        double repayAmountRaw = parseDouble(body.get("repayAmount"));
+        if (repayAmountRaw == 0.0) {
+            repayAmountRaw = parseDouble(body.get("amount"));
         }
+        final double repayAmount = repayAmountRaw;
 
         if (contractId == null || contractId.isBlank()) {
             return CompletableFuture.completedFuture(
@@ -420,10 +586,11 @@ public class UmbraController {
         // ✅ DECENTRALIZED: Any authenticated user can liquidate!
         String liquidator = authenticatedPartyProvider.getPartyOrFail();
 
-        String positionId = String.valueOf(body.getOrDefault("positionId", ""));
-        if (positionId.isBlank()) {
-            positionId = String.valueOf(body.getOrDefault("contractId", ""));
+        String positionIdRaw = String.valueOf(body.getOrDefault("positionId", ""));
+        if (positionIdRaw.isBlank()) {
+            positionIdRaw = String.valueOf(body.getOrDefault("contractId", ""));
         }
+        final String positionId = positionIdRaw;
         String borrowOracleCid = body.get("borrowOracleCid") == null ? null : String.valueOf(body.get("borrowOracleCid"));
         String collateralOracleCid = body.get("collateralOracleCid") == null ? null : String.valueOf(body.get("collateralOracleCid"));
 
@@ -497,7 +664,7 @@ public class UmbraController {
             return ResponseEntity.ok(Map.<String, Object>of("supply", supply, "borrow", borrow));
         } catch (Exception e) {
             logger.error("Failed to get positions", e);
-            return ResponseEntity.internalServerError().body(Map.<String, Object>of("error", e.getMessage()));
+            return ResponseEntity.internalServerError().body(Map.<String, Object>of("error", "Failed to load positions"));
         }
     }
 
@@ -561,14 +728,9 @@ public class UmbraController {
     }
 
     private Map<String, Object> forbiddenPartyScopeMap(String message, String requestedParty) {
-        String authenticatedParty = authenticatedPartyProvider.getParty().orElse("");
-        String operatorParty = config.getOperatorParty() == null ? "" : config.getOperatorParty();
         return Map.of(
                 "error", message,
-                "code", "FORBIDDEN_PARTY_SCOPE",
-                "requestedParty", requestedParty,
-                "authenticatedParty", authenticatedParty,
-                "operatorParty", operatorParty
+                "code", "FORBIDDEN_PARTY_SCOPE"
         );
     }
 
@@ -583,41 +745,33 @@ public class UmbraController {
         }
         return ResponseEntity.status(403).body(Map.of(
                 "error", action + " requires an operator session. Log in as app-provider.",
-                "code", "OPERATOR_SESSION_REQUIRED",
-                "authenticatedParty", authenticatedParty,
-                "operatorParty", operatorParty
+                "code", "OPERATOR_SESSION_REQUIRED"
         ));
     }
 
     private ResponseEntity<Map<String, Object>> mapLedgerWriteFailure(String action, Throwable error) {
         Throwable root = unwrap(error);
         if (root instanceof StatusRuntimeException sre && sre.getStatus().getCode() == Status.Code.PERMISSION_DENIED) {
-            String authenticatedParty = authenticatedPartyProvider.getParty().orElse("");
-            String operatorParty = config.getOperatorParty() == null ? "" : config.getOperatorParty();
             return ResponseEntity.status(403).body(Map.of(
                     "error", action + " was denied by the ledger. Use app-provider/operator credentials.",
-                    "code", "LEDGER_PERMISSION_DENIED",
-                    "authenticatedParty", authenticatedParty,
-                    "operatorParty", operatorParty,
-                    "details", String.valueOf(sre.getStatus().getDescription())
+                    "code", "LEDGER_PERMISSION_DENIED"
             ));
         }
         if (root instanceof StatusRuntimeException sre && sre.getStatus().getCode() == Status.Code.UNAVAILABLE) {
             return ResponseEntity.status(503).body(Map.of(
                     "error", action + " failed because the ledger is unavailable. Wait for canton/splice/backend to become healthy and retry.",
-                    "code", "LEDGER_UNAVAILABLE",
-                    "details", String.valueOf(sre.getStatus().getDescription())
+                    "code", "LEDGER_UNAVAILABLE"
             ));
         }
         if (root instanceof StatusRuntimeException sre && sre.getStatus().getCode() == Status.Code.DEADLINE_EXCEEDED) {
             return ResponseEntity.status(504).body(Map.of(
                     "error", action + " timed out while waiting for the ledger.",
-                    "code", "LEDGER_TIMEOUT",
-                    "details", String.valueOf(sre.getStatus().getDescription())
+                    "code", "LEDGER_TIMEOUT"
             ));
         }
+        logger.error("{} failed", action, root);
         return ResponseEntity.internalServerError().body(
-                Map.of("error", root.getMessage() == null ? action + " failed" : root.getMessage())
+                Map.of("error", action + " failed")
         );
     }
 

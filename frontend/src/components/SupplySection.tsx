@@ -15,16 +15,17 @@ const SupplySection: React.FC<Props> = ({ trader, positions, onAction }) => {
       toast.displayError('No authenticated party found.');
       return;
     }
-    if (!amount) {
-      toast.displayWarning('Supply amount is required.');
+    const parsed = parseFloat(amount);
+    if (!amount || !isFinite(parsed) || parsed <= 0) {
+      toast.displayWarning('Supply amount must be a positive number.');
       return;
     }
     setLoading(true);
     try {
-      await supply({ supplier: trader, amount: parseFloat(amount) });
+      await supply({ supplier: trader, amount: parsed });
+      toast.displaySuccess('Supply submitted.');
       setAmount('');
       onAction();
-      toast.displaySuccess('Supply submitted.');
     }
     catch (e: any) {
       console.error(e);

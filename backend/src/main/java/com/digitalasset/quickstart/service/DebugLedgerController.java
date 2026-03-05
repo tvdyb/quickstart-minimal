@@ -332,7 +332,8 @@ public class DebugLedgerController {
                 UmbraConfig.ORACLE_PRICE_TEMPLATE,
                 UmbraConfig.SPOT_ORDER_TEMPLATE,
                 UmbraConfig.SUPPLY_POSITION_TEMPLATE,
-                UmbraConfig.TRADE_CONFIRM_TEMPLATE
+                UmbraConfig.BUYER_CONFIRM_TEMPLATE,
+                UmbraConfig.SELLER_CONFIRM_TEMPLATE
         );
     }
 

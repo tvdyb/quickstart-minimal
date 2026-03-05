@@ -15,11 +15,20 @@ testDarkPool = script do
   alice <- allocateParty "Alice"
   bob <- allocateParty "Bob"
 
+  let startTime = time (date 2026 Jan 15) 12 0 0
+  setTime startTime
+
+  -- Create pause contract first
+  pauseCid <- submit operator do
+    createCmd ProtocolPause with
+      operator
+      isPaused = False
+      reason = ""
+      pausedAt = None
+
   -- Setup: create dark pool operator
   poolOp <- submit operator do
-    createCmd DarkPoolOperator with operator
-
-  setTime (time (date 2026 Jan 15) 12 0 0)
+    createCmd DarkPoolOperator with operator, pauseCid
 
   -- Alice creates a buy order with quantity 2.0
   buyOrder <- submitMulti [operator, alice] [] do
@@ -42,14 +51,15 @@ testDarkPool = script do
       quantity = 1.0
 
   -- Operator partially fills Alice's buy by 1.0 BTC.
-  (_, buyResidualOpt, _) <- submit operator do
+  -- FillOrder requires both operator and counterparty authorization
+  (_, _, buyResidualOpt, _) <- submitMulti [operator, bob] [] do
     exerciseCmd buyOrder FillOrder with
       fillPrice = 50000.0
       fillQuantity = 1.0
       counterparty = bob
 
   -- Bob's sell is fully filled.
-  (_, _, _) <- submit operator do
+  (_, _, _, _) <- submitMulti [operator, alice] [] do
     exerciseCmd sellOrder FillOrder with
       fillPrice = 50000.0
       fillQuantity = 1.0
@@ -69,13 +79,13 @@ testDarkPool = script do
       price = 50000.0
       quantity = 1.0
 
-  (_, _, _) <- submit operator do
+  (_, _, _, _) <- submitMulti [operator, bob] [] do
     exerciseCmd buyResidual FillOrder with
       fillPrice = 50000.0
       fillQuantity = 1.0
       counterparty = bob
 
-  (_, _, _) <- submit operator do
+  (_, _, _, _) <- submitMulti [operator, alice] [] do
     exerciseCmd sellOrder2 FillOrder with
       fillPrice = 50000.0
       fillQuantity = 1.0
@@ -107,6 +117,14 @@ testLending = script do
   let startTime = time (date 2026 Jan 15) 12 0 0
   setTime startTime
 
+  -- Create pause contract
+  pauseCid <- submit operator do
+    createCmd ProtocolPause with
+      operator
+      isPaused = False
+      reason = ""
+      pausedAt = None
+
   -- Create oracle prices with operator as observer so lending pool can read them
   usdcOracle <- submit oracle do
     createCmd OraclePrice with
@@ -115,6 +133,9 @@ testLending = script do
       asset = "USDC"
       price = 1.0
       lastUpdated = startTime
+      minPrice = 0.90
+      maxPrice = 1.10
+      maxChangePercent = 0.1
 
   ccOracle <- submit oracle do
     createCmd OraclePrice with
@@ -123,6 +144,9 @@ testLending = script do
       asset = "CC"
       price = 10.0
       lastUpdated = startTime
+      minPrice = 0.01
+      maxPrice = 100.0
+      maxChangePercent = 0.5
 
   let rateModel = RateModelParams with
         baseRate = 0.02
@@ -138,20 +162,21 @@ testLending = script do
       totalBorrows = 0.0
       reserves = 0.0
       reserveFactor = 0.10
-      borrowCap = 1200.0
+      borrowCap = Some 1200.0
       rateModel
       collateralConfig = defaultCCCollateral
       lastUpdateTime = startTime
       accumulatedIndex = 1.0
+      pauseCid
 
   -- Alice supplies 10000 USDC
-  (pool2, _, _) <- submitMulti [operator, alice] [] do
+  (pool2, _, _) <- submit alice do
     exerciseCmd pool Supply with
       supplier = alice
       amount = 10000.0
 
   -- Bob borrows 1000 USDC with 200 CC collateral
-  (pool3, borrowPos, _) <- submitMulti [operator, bob] [] do
+  (pool3, borrowPos, _) <- submit bob do
     exerciseCmd pool2 Borrow with
       borrower = bob
       borrowAmount = 1000.0
@@ -160,7 +185,7 @@ testLending = script do
       collateralOracleCid = ccOracle
 
   -- Check health factor
-  hf <- submit operator do
+  hf <- submit bob do
     exerciseCmd borrowPos GetHealthFactor with
       borrowOracleCid = usdcOracle
       collateralOracleCid = ccOracle
@@ -176,7 +201,7 @@ testLending = script do
     exerciseCmd pool3 AccrueInterest
 
   -- Bob partially repays from the accrued debt.
-  (pool5, residualOpt, _) <- submitMulti [operator, bob] [] do
+  (pool5, residualOpt, _) <- submit bob do
     exerciseCmd borrowPos Repay with
       poolCid = pool4
       repayAmount = 250.0
@@ -186,7 +211,7 @@ testLending = script do
     None -> abort "Expected residual borrow position after partial repay"
 
   -- Bob fully closes remaining debt.
-  (pool6, residualOpt2, _) <- submitMulti [operator, bob] [] do
+  (pool6, residualOpt2, _) <- submit bob do
     exerciseCmd residualBorrow Repay with
       poolCid = pool5
       repayAmount = 2000.0
@@ -196,7 +221,7 @@ testLending = script do
     None -> pure ()
 
   -- Old oracle contracts are now stale (next day with 1h max age), borrowing should fail.
-  submitMultiMustFail [operator, bob] [] do
+  submitMustFail bob do
     exerciseCmd pool6 Borrow with
       borrower = bob
       borrowAmount = 100.0
@@ -213,7 +238,7 @@ testLending = script do
       newPrice = 10.0
 
   -- Borrow cap enforcement.
-  submitMultiMustFail [operator, bob] [] do
+  submitMustFail bob do
     exerciseCmd pool6 Borrow with
       borrower = bob
       borrowAmount = 1300.0
@@ -222,7 +247,7 @@ testLending = script do
       collateralOracleCid = ccOracleFresh
 
   -- Open a new borrow to test liquidation.
-  (pool7, riskyBorrow, _) <- submitMulti [operator, bob] [] do
+  (pool7, riskyBorrow, _) <- submit bob do
     exerciseCmd pool6 Borrow with
       borrower = bob
       borrowAmount = 500.0
@@ -233,7 +258,7 @@ testLending = script do
   -- Drop collateral price so the position becomes liquidatable.
   ccOracleDown <- submit oracle do
     exerciseCmd ccOracleFresh UpdatePrice with
-      newPrice = 3.0
+      newPrice = 5.0
 
   (_pool8, liquidationResidualOpt, _) <- submit operator do
     exerciseCmd riskyBorrow Liquidate with
@@ -263,6 +288,9 @@ testOracle = script do
       asset = "BTC"
       price = 50000.0
       lastUpdated = startTime
+      minPrice = 10000.0
+      maxPrice = 100000.0
+      maxChangePercent = 0.5
 
   let nextTime = time (date 2026 Jan 15) 13 0 0
   setTime nextTime

@@ -105,9 +105,21 @@ public class UmbraLedgerClient {
     }
 
     /**
-     * Create a contract.
+     * Create a contract (fire-and-forget).
      */
     public CompletableFuture<Void> createContract(
+            String moduleName,
+            String entityName,
+            ValueOuterClass.Record payload,
+            String actAs
+    ) {
+        return createContractAndWait(moduleName, entityName, payload, actAs).thenApply(tx -> null);
+    }
+
+    /**
+     * Create a contract and wait for the transaction, returning it.
+     */
+    public CompletableFuture<TransactionOuterClass.Transaction> createContractAndWait(
             String moduleName,
             String entityName,
             ValueOuterClass.Record payload,
@@ -128,11 +140,21 @@ public class UmbraLedgerClient {
                 .addCommands(cmd)
                 .build();
 
-        var request = CommandSubmissionServiceOuterClass.SubmitRequest.newBuilder()
-                .setCommands(cmds)
+        var eventFormat = TransactionFilterOuterClass.EventFormat.newBuilder()
+                .putFiltersByParty(actAs, TransactionFilterOuterClass.Filters.newBuilder().build())
+                .build();
+        var txFormat = TransactionFilterOuterClass.TransactionFormat.newBuilder()
+                .setEventFormat(eventFormat)
+                .setTransactionShape(TransactionFilterOuterClass.TransactionShape.TRANSACTION_SHAPE_LEDGER_EFFECTS)
                 .build();
 
-        return toCompletableFuture(submission.submit(request)).thenApply(r -> null);
+        var request = CommandServiceOuterClass.SubmitAndWaitForTransactionRequest.newBuilder()
+                .setCommands(cmds)
+                .setTransactionFormat(txFormat)
+                .build();
+
+        return toCompletableFuture(commands.submitAndWaitForTransaction(request))
+                .thenApply(CommandServiceOuterClass.SubmitAndWaitForTransactionResponse::getTransaction);
     }
 
     /**

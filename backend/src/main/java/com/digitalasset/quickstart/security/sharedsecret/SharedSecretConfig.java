@@ -51,7 +51,9 @@ public class SharedSecretConfig {
         http
                 .csrf(csrf -> csrf.disable())
                 .authorizeHttpRequests(authorize -> authorize
-                        .requestMatchers(HttpMethod.GET, "/login", "/user", "/login-links", "/feature-flags", "/debug/**", "/error", "/oauth2/authorization/**").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/login", "/user", "/login-links", "/feature-flags", "/error", "/oauth2/authorization/**").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/umbra/bootstrap").permitAll()
+                        .requestMatchers("/debug/**").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.POST, "/logout").permitAll()
                         .requestMatchers("/admin/**").hasRole("ADMIN")
                         .anyRequest().authenticated()

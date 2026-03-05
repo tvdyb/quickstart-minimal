@@ -6,6 +6,46 @@ import Umbra.ActivityMarker (ActivityRecord(..))
 import DA.Time (subTime, convertRelTimeToMicroseconds)
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- TOP-LEVEL HELPERS (extracted from template to fix Daml 3.x compatibility)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- | Calculate accrued interest given pool state and current time.
+-- Returns (newBorrows, newReserves, newIndex, borrowRate).
+accrueInterestInternal : LendingPool -> Time -> (Decimal, Decimal, Decimal, Decimal)
+accrueInterestInternal pool now =
+  let elapsed = subTime now pool.lastUpdateTime
+      elapsedMicros = convertRelTimeToMicroseconds elapsed
+      elapsedSeconds = intToDecimal elapsedMicros / 1000000.0
+      lendableSupply = max 0.0 (pool.totalSupply - pool.reserves)
+      utilization = if lendableSupply == 0.0 then 0.0 else pool.totalBorrows / lendableSupply
+      borrowRate =
+        if utilization <= pool.rateModel.kink
+          then pool.rateModel.baseRate + utilization * pool.rateModel.multiplier
+          else
+            let normalRate = pool.rateModel.baseRate + pool.rateModel.kink * pool.rateModel.multiplier
+                excessUtil = utilization - pool.rateModel.kink
+            in normalRate + excessUtil * pool.rateModel.jumpMultiplier
+      interestFactor = borrowRate * elapsedSeconds / secondsPerYear
+      newBorrows = pool.totalBorrows * (1.0 + interestFactor)
+      interestAccrued = newBorrows - pool.totalBorrows
+      reserveAccrual = max 0.0 (interestAccrued * pool.reserveFactor)
+      newReserves = pool.reserves + reserveAccrual
+      newIndex = pool.accumulatedIndex * (1.0 + interestFactor)
+  in (newBorrows, newReserves, newIndex, borrowRate)
+
+-- | Validate pool invariants.
+validatePoolInvariants : LendingPool -> Update ()
+validatePoolInvariants pool = do
+  assertMsg "Reserve factor must be in [0, 1]" (pool.reserveFactor >= 0.0 && pool.reserveFactor <= 1.0)
+  assertMsg "LTV ratio must be in [0, 1]" (pool.collateralConfig.ltvRatio >= 0.0 && pool.collateralConfig.ltvRatio <= 1.0)
+  assertMsg "Liquidation threshold must be in [0, 1]" (pool.collateralConfig.liquidationThreshold >= 0.0 && pool.collateralConfig.liquidationThreshold <= 1.0)
+  assertMsg ("Liquidation bonus must be in [0, " <> show maxLiquidationBonus <> "]")
+    (pool.collateralConfig.liquidationBonus >= 0.0 && pool.collateralConfig.liquidationBonus <= maxLiquidationBonus)
+  assertMsg "Close factor must be in (0, 1]"
+    (pool.collateralConfig.closeFactor > 0.0 && pool.collateralConfig.closeFactor <= 1.0)
+  return ()
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- LENDING POOL - CORE STATE TEMPLATE
 -- ═══════════════════════════════════════════════════════════════════════════
 
@@ -26,46 +66,6 @@ template LendingPool
     pauseCid : ContractId ProtocolPause  -- Reference to pause contract
   where
     signatory operator
-
-    -- ───────────────────────────────────────────────────────────────────────
-    -- HELPER: Calculate current state with accrued interest
-    -- This is the KEY to decentralization - every operation recalculates interest
-    -- ───────────────────────────────────────────────────────────────────────
-    let accrueInterestInternal : Time -> (Decimal, Decimal, Decimal, Decimal)
-        accrueInterestInternal now =
-          let elapsed = subTime now lastUpdateTime
-              elapsedMicros = convertRelTimeToMicroseconds elapsed
-              elapsedSeconds = intToDecimal elapsedMicros / 1000000.0
-              lendableSupply = max 0.0 (totalSupply - reserves)
-              utilization = if lendableSupply == 0.0 then 0.0 else totalBorrows / lendableSupply
-              borrowRate =
-                if utilization <= rateModel.kink
-                  then rateModel.baseRate + utilization * rateModel.multiplier
-                  else
-                    let normalRate = rateModel.baseRate + rateModel.kink * rateModel.multiplier
-                        excessUtil = utilization - rateModel.kink
-                    in normalRate + excessUtil * rateModel.jumpMultiplier
-              interestFactor = borrowRate * elapsedSeconds / secondsPerYear
-              newBorrows = totalBorrows * (1.0 + interestFactor)
-              interestAccrued = newBorrows - totalBorrows
-              reserveAccrual = max 0.0 (interestAccrued * reserveFactor)
-              newReserves = reserves + reserveAccrual
-              newIndex = accumulatedIndex * (1.0 + interestFactor)
-          in (newBorrows, newReserves, newIndex, borrowRate)
-
-    -- ───────────────────────────────────────────────────────────────────────
-    -- SAFETY VALIDATORS
-    -- ───────────────────────────────────────────────────────────────────────
-    let validateInvariants : Update ()
-        validateInvariants = do
-          assertMsg "Reserve factor must be in [0, 1]" (reserveFactor >= 0.0 && reserveFactor <= 1.0)
-          assertMsg "LTV ratio must be in [0, 1]" (collateralConfig.ltvRatio >= 0.0 && collateralConfig.ltvRatio <= 1.0)
-          assertMsg "Liquidation threshold must be in [0, 1]" (collateralConfig.liquidationThreshold >= 0.0 && collateralConfig.liquidationThreshold <= 1.0)
-          assertMsg ("Liquidation bonus must be in [0, " <> show maxLiquidationBonus <> "]")
-            (collateralConfig.liquidationBonus >= 0.0 && collateralConfig.liquidationBonus <= maxLiquidationBonus)
-          assertMsg "Close factor must be in (0, 1]"
-            (collateralConfig.closeFactor > 0.0 && collateralConfig.closeFactor <= 1.0)
-          return ()
 
     -- ───────────────────────────────────────────────────────────────────────
     -- READ-ONLY QUERIES
@@ -100,8 +100,8 @@ template LendingPool
       controller operator
       do
         now <- getTime
-        validateInvariants
-        let (newBorrows, newReserves, newIndex, _rate) = accrueInterestInternal now
+        validatePoolInvariants this
+        let (newBorrows, newReserves, newIndex, _rate) = accrueInterestInternal this now
         create this with
           totalBorrows = newBorrows
           reserves = newReserves
@@ -121,12 +121,12 @@ template LendingPool
         pause <- fetch pauseCid
         assertMsg ("Protocol is paused: " <> pause.reason) (not pause.isPaused)
 
-        validateInvariants
+        validatePoolInvariants this
         now <- getTime
         assertMsg "Supply amount must be positive" (amount > 0.0)
 
         -- Accrue interest inline before modifying state
-        let (newBorrows, newReserves, newIndex, _rate) = accrueInterestInternal now
+        let (newBorrows, newReserves, newIndex, _rate) = accrueInterestInternal this now
 
         newPool <- create this with
           totalSupply = totalSupply + amount
@@ -169,13 +169,14 @@ template LendingPool
         pause <- fetch pauseCid
         assertMsg ("Protocol is paused: " <> pause.reason) (not pause.isPaused)
 
-        validateInvariants
+        validatePoolInvariants this
         now <- getTime
         assertMsg "Borrow amount must be positive" (borrowAmount > 0.0)
         assertMsg "Collateral amount must be positive" (collateralAmount > 0.0)
+        assertMsg "Collateral amount below minimum threshold" (collateralAmount >= 0.01)
 
         -- Accrue interest inline before modifying state
-        let (newBorrows, newReserves, newIndex, _rate) = accrueInterestInternal now
+        let (newBorrows, newReserves, newIndex, _rate) = accrueInterestInternal this now
 
         -- Check collateral value vs borrow value
         borrowOracle <- fetch oracleCid
@@ -185,10 +186,11 @@ template LendingPool
         assertMsg "Borrow oracle is stale" (borrowOracleAgeSeconds <= collateralConfig.oracleMaxAgeSeconds)
         assertMsg "Collateral oracle is stale" (collateralOracleAgeSeconds <= collateralConfig.oracleMaxAgeSeconds)
 
+        assertMsg "Oracle prices must be positive" (borrowOracle.price > 0.0 && collateralOracle.price > 0.0)
         let borrowValue = borrowAmount * borrowOracle.price
         let collateralValue = collateralAmount * collateralOracle.price
         let maxBorrow = collateralValue * collateralConfig.ltvRatio
-        let lendableSupply = max 0.0 (totalSupply + amount - newReserves)
+        let lendableSupply = max 0.0 (totalSupply - newReserves)
         let availableLiquidity = lendableSupply - newBorrows
 
         assertMsg "Insufficient collateral" (borrowValue <= maxBorrow)
@@ -371,6 +373,13 @@ template BorrowPosition
         assertMsg "Borrow oracle is stale" (borrowOracleAgeSeconds <= pool.collateralConfig.oracleMaxAgeSeconds)
         assertMsg "Collateral oracle is stale" (collateralOracleAgeSeconds <= pool.collateralConfig.oracleMaxAgeSeconds)
 
+        -- Oracle price sanity check (prevent near-zero price exploits)
+        assertMsg "Borrow oracle price must be positive" (borrowOracle.price > 0.0)
+        assertMsg "Collateral oracle price must be positive" (collateralOracle.price > 0.0)
+        let minOraclePrice = 0.0001
+        assertMsg "Borrow oracle price too low for safe liquidation" (borrowOracle.price >= minOraclePrice)
+        assertMsg "Collateral oracle price too low for safe liquidation" (collateralOracle.price >= minOraclePrice)
+
         -- Calculate current debt with accrued interest
         let currentIndex = pool.accumulatedIndex
         let growthFactor = currentIndex / entryIndex
@@ -412,7 +421,7 @@ template BorrowPosition
         newPool <- create pool with totalBorrows = newTotalBorrows
 
         residualPosition <-
-          if debtAfter <= dustThreshold
+          if debtAfter <= dustThreshold || collateralAfter <= dustThreshold
             then pure None
             else do
               residual <- create this with

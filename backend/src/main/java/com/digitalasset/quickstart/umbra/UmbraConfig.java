@@ -1,5 +1,8 @@
 package com.digitalasset.quickstart.umbra;
 
+import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
@@ -7,9 +10,21 @@ import org.springframework.stereotype.Component;
 @ConfigurationProperties(prefix = "umbra")
 public class UmbraConfig {
 
+    private static final Logger logger = LoggerFactory.getLogger(UmbraConfig.class);
+
     private String operatorParty = "";
     private String oracleParty = "";
-    private String packageId = "umbra-protocol";
+    private String packageId = "#umbra-protocol";
+
+    @PostConstruct
+    public void validate() {
+        if (operatorParty == null || operatorParty.isBlank()) {
+            logger.warn("umbra.operator-party is not configured; Umbra endpoints will be limited");
+        }
+        if (oracleParty == null || oracleParty.isBlank()) {
+            logger.warn("umbra.oracle-party is not configured; oracle updates will be disabled");
+        }
+    }
 
     // Template qualified names for PQS queries
     // These match the DAML module paths: Umbra.DarkPool:SpotOrder etc.

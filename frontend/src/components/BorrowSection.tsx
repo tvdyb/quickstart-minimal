@@ -20,8 +20,8 @@ const BorrowSection: React.FC<Props> = ({ trader, ccPrice, onAction }) => {
       toast.displayError('No authenticated party found.');
       return;
     }
-    if (!collateral || !amount) {
-      toast.displayWarning('Collateral and borrow amount are required.');
+    if (!collateral || !amount || !isFinite(collateralVal) || !isFinite(borrowVal) || collateralVal <= 0 || borrowVal <= 0) {
+      toast.displayWarning('Collateral and borrow amount must be positive numbers.');
       return;
     }
     setLoading(true);
@@ -31,10 +31,10 @@ const BorrowSection: React.FC<Props> = ({ trader, ccPrice, onAction }) => {
         collateralAmount: collateralVal,
         borrowAmount: borrowVal,
       });
+      toast.displaySuccess('Borrow submitted.');
       setCollateral('');
       setAmount('');
       onAction();
-      toast.displaySuccess('Borrow submitted.');
     }
     catch (e: any) {
       console.error(e);

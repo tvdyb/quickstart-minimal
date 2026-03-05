@@ -94,7 +94,7 @@ template SpotOrder
         fillPrice : Price
         fillQuantity : Quantity
         counterparty : Party
-      controller operator
+      controller operator, counterparty
       do
         now <- getTime
         assertMsg "Order must be Open to fill" (status == Open)
@@ -137,7 +137,7 @@ template SpotOrder
 
         activity <- create ActivityRecord with
           operator
-          user = trader
+          user = operator  -- PRIVACY: Use operator, not trader identity, to prevent trade correlation
           activityType = "TRADE"
           description = "Dark pool trade: " <> show fillQuantity <> " " <> baseAsset <> "/" <> quoteAsset
           timestamp = now

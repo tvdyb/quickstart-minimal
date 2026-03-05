@@ -67,6 +67,34 @@ public class ProtoHelper {
         return Value.newBuilder().setRecord(Record.newBuilder().build()).build();
     }
 
+    public static Value listVal(Value... elements) {
+        ValueOuterClass.List.Builder lb = ValueOuterClass.List.newBuilder();
+        for (Value v : elements) {
+            lb.addElements(v);
+        }
+        return Value.newBuilder().setList(lb.build()).build();
+    }
+
+    public static Value optionalVal(Value inner) {
+        return Value.newBuilder()
+                .setOptional(ValueOuterClass.Optional.newBuilder().setValue(inner).build())
+                .build();
+    }
+
+    public static Value optionalNone() {
+        return Value.newBuilder()
+                .setOptional(ValueOuterClass.Optional.newBuilder().build())
+                .build();
+    }
+
+    public static Value timestampVal(long microseconds) {
+        return Value.newBuilder().setTimestamp(microseconds).build();
+    }
+
+    public static Value int64Val(long n) {
+        return Value.newBuilder().setInt64(n).build();
+    }
+
     public static Record record(RecordField... fields) {
         Record.Builder rb = Record.newBuilder();
         for (RecordField f : fields) {

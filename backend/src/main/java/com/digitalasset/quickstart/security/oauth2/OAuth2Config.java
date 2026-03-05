@@ -64,11 +64,14 @@ public class OAuth2Config {
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
                 .csrf((csrf) -> csrf
-                        .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse())
+                        .csrfTokenRepository(new CookieCsrfTokenRepository())
                         .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler())
+                        .ignoringRequestMatchers("/umbra/bootstrap", "/orders", "/orders/**", "/pool/**")
                 )
                 .authorizeHttpRequests(authorize -> authorize
-                        .requestMatchers(HttpMethod.GET, "/user", "/login-links", "/feature-flags", "/debug/**", "/oauth2/authorization/**").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/user", "/login-links", "/feature-flags", "/oauth2/authorization/**").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/umbra/bootstrap").permitAll()
+                        .requestMatchers("/debug/**").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.POST, "/logout").permitAll()
                         .requestMatchers("/admin/**").hasRole("ADMIN")
                         .anyRequest().authenticated()
@@ -103,11 +106,13 @@ public class OAuth2Config {
             @Override
             public Collection<GrantedAuthority> convert(Jwt jwt) {
                 Collection<GrantedAuthority> authorities = new HashSet<>(defaultGrantedAuthoritiesConverter.convert(jwt));
-                // there is only one AppProvider issuer that can issue JWT to authenticate to ResourceServer
-                // we consider anybody with JWT from that issuer to be admin
-                authorities.add(new SimpleGrantedAuthority("ROLE_ADMIN"));
                 authorities.add(new PartyAuthority(partyId));
                 authorities.add(new TenantAuthority(tenantId));
+                // Only grant ADMIN to the configured AppProvider party, not all JWT holders
+                String sub = jwt.getSubject();
+                if (sub != null && sub.equals(tenantId)) {
+                    authorities.add(new SimpleGrantedAuthority("ROLE_ADMIN"));
+                }
                 return authorities;
             }
         });

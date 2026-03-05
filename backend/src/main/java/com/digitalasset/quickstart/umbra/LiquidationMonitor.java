@@ -8,6 +8,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static com.digitalasset.quickstart.umbra.ProtoHelper.*;
 
@@ -15,18 +16,10 @@ import static com.digitalasset.quickstart.umbra.ProtoHelper.*;
  * LIQUIDATION BOT: Monitors all BorrowPositions and triggers liquidation when health factor < 1.0.
  * Runs every 30 seconds.
  *
- * DECENTRALIZATION UPDATE: The Liquidate choice is now PUBLIC - ANY party can call it,
- * not just the operator. This creates a competitive liquidation market like Aave/Compound.
+ * The health factor calculation is on-chain in DAML. This bot calculates locally for optimization,
+ * but the DAML contract validates everything atomically with fresh oracle prices.
  *
- * This monitor is just ONE liquidation bot. In production, multiple independent bots
- * (run by different parties) should compete to liquidate positions for profit.
- *
- * The health factor calculation is now ON-CHAIN in DAML, not off-chain in Java.
- * This bot still calculates locally for optimization, but the DAML contract validates
- * everything atomically with fresh oracle prices.
- *
- * DECENTRALIZATION STATUS: This is an optional bot. Anyone can liquidate directly
- * by calling the BorrowPosition.Liquidate choice.
+ * This is an optional bot. Anyone can liquidate directly by calling BorrowPosition.Liquidate.
  */
 @Component
 public class LiquidationMonitor {
@@ -36,6 +29,9 @@ public class LiquidationMonitor {
     private final UmbraRepository repo;
     private final UmbraLedgerClient ledger;
     private final UmbraConfig config;
+
+    // Track in-flight liquidations to prevent double-submission
+    private final Set<String> pendingLiquidations = ConcurrentHashMap.newKeySet();
 
     @Autowired
     public LiquidationMonitor(UmbraRepository repo, UmbraLedgerClient ledger, UmbraConfig config) {
@@ -53,7 +49,7 @@ public class LiquidationMonitor {
             List<Map<String, Object>> positions = repo.getAllBorrowPositions();
             if (positions.isEmpty()) return;
 
-            // Get oracle prices for health factor calculation
+            // Re-fetch oracle prices for each cycle
             Optional<Map<String, Object>> borrowOracle = repo.getOraclePrice("USDC");
             Optional<Map<String, Object>> collateralOracle = repo.getOraclePrice("CC");
             if (borrowOracle.isEmpty() || collateralOracle.isEmpty()) {
@@ -63,20 +59,45 @@ public class LiquidationMonitor {
 
             @SuppressWarnings("unchecked")
             Map<String, Object> borrowOraclePayload = (Map<String, Object>) borrowOracle.get().get("payload");
-            double borrowPrice = Double.parseDouble(String.valueOf(borrowOraclePayload.get("price")));
-
             @SuppressWarnings("unchecked")
             Map<String, Object> collOraclePayload = (Map<String, Object>) collateralOracle.get().get("payload");
-            double collPrice = Double.parseDouble(String.valueOf(collOraclePayload.get("price")));
+
+            Object borrowPriceRaw = borrowOraclePayload.get("price");
+            Object collPriceRaw = collOraclePayload.get("price");
+            if (borrowPriceRaw == null || collPriceRaw == null) {
+                logger.warn("Oracle price payload missing 'price' field");
+                return;
+            }
+
+            double borrowPrice;
+            double collPrice;
+            try {
+                borrowPrice = Double.parseDouble(String.valueOf(borrowPriceRaw));
+                collPrice = Double.parseDouble(String.valueOf(collPriceRaw));
+            } catch (NumberFormatException e) {
+                logger.warn("Failed to parse oracle prices: borrow={}, collateral={}", borrowPriceRaw, collPriceRaw);
+                return;
+            }
+
+            if (borrowPrice <= 0.0 || collPrice <= 0.0) {
+                logger.warn("Oracle prices non-positive: borrow={}, collateral={}", borrowPrice, collPrice);
+                return;
+            }
 
             String borrowOracleCid = (String) borrowOracle.get().get("contractId");
             String collOracleCid = (String) collateralOracle.get().get("contractId");
 
             for (Map<String, Object> pos : positions) {
-                Optional<Map<String, Object>> poolOpt = repo.getLendingPool();
-                if (poolOpt.isEmpty()) {
-                    return;
+                String contractId = (String) pos.get("contractId");
+
+                // Skip if already attempting liquidation
+                if (pendingLiquidations.contains(contractId)) {
+                    continue;
                 }
+
+                // Re-fetch pool per position to get latest state
+                Optional<Map<String, Object>> poolOpt = repo.getLendingPool();
+                if (poolOpt.isEmpty()) return;
 
                 @SuppressWarnings("unchecked")
                 Map<String, Object> poolPayload = (Map<String, Object>) poolOpt.get().get("payload");
@@ -85,14 +106,13 @@ public class LiquidationMonitor {
 
                 @SuppressWarnings("unchecked")
                 Map<String, Object> payload = (Map<String, Object>) pos.get("payload");
-                String contractId = (String) pos.get("contractId");
 
                 double borrowAmount = Double.parseDouble(String.valueOf(payload.get("borrowAmount")));
                 double collateralAmount = Double.parseDouble(String.valueOf(payload.get("collateralAmount")));
                 double entryIndex = Double.parseDouble(String.valueOf(payload.get("entryIndex")));
                 double liquidationThreshold = Double.parseDouble(String.valueOf(payload.get("liquidationThreshold")));
 
-                // Calculate health factor locally
+                // Calculate health factor locally (on-chain DAML validates authoritatively)
                 double growthFactor = accIndex / entryIndex;
                 double currentDebt = borrowAmount * growthFactor;
                 double debtValue = currentDebt * borrowPrice;
@@ -101,6 +121,8 @@ public class LiquidationMonitor {
 
                 if (healthFactor < 1.0) {
                     logger.warn("Liquidating position {} with health factor {}", contractId, healthFactor);
+
+                    pendingLiquidations.add(contractId);
 
                     ValueOuterClass.Value choiceArg = recordVal(
                             field("liquidator", partyVal(operator)),
@@ -115,15 +137,18 @@ public class LiquidationMonitor {
                             "Liquidate",
                             choiceArg,
                             operator
-                    ).thenAccept(tx -> logger.info("Liquidated position {} (tx: {})", contractId, tx.getUpdateId()))
-                     .exceptionally(e -> {
-                         logger.error("Failed to liquidate position {}", contractId, e);
-                         return null;
-                     });
+                    ).thenAccept(tx -> {
+                        logger.info("Liquidated position {} (tx: {})", contractId, tx.getUpdateId());
+                        pendingLiquidations.remove(contractId);
+                    }).exceptionally(e -> {
+                        logger.warn("Failed to liquidate position {}", contractId, e);
+                        pendingLiquidations.remove(contractId);
+                        return null;
+                    });
                 }
             }
         } catch (Exception e) {
-            logger.debug("Liquidation check error (may be normal if no contracts exist)", e);
+            logger.warn("Liquidation check error", e);
         }
     }
 }
