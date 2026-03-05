@@ -10,8 +10,10 @@ import DA.Time (subTime, convertRelTimeToMicroseconds)
 -- ═══════════════════════════════════════════════════════════════════════════
 
 -- | Calculate accrued interest given pool state and current time.
--- Returns (newBorrows, newReserves, newIndex, borrowRate).
-accrueInterestInternal : LendingPool -> Time -> (Decimal, Decimal, Decimal, Decimal)
+-- Returns (newTotalSupply, newBorrows, newReserves, newSupplyIndex, newBorrowIndex).
+-- Supply index grows at supply rate (= borrowRate * utilization * (1 - reserveFactor)).
+-- Borrow index grows at borrow rate (used for debt calculations).
+accrueInterestInternal : LendingPool -> Time -> (Decimal, Decimal, Decimal, Decimal, Decimal)
 accrueInterestInternal pool now =
   let elapsed = subTime now pool.lastUpdateTime
       elapsedMicros = convertRelTimeToMicroseconds elapsed
@@ -25,13 +27,17 @@ accrueInterestInternal pool now =
             let normalRate = pool.rateModel.baseRate + pool.rateModel.kink * pool.rateModel.multiplier
                 excessUtil = utilization - pool.rateModel.kink
             in normalRate + excessUtil * pool.rateModel.jumpMultiplier
-      interestFactor = borrowRate * elapsedSeconds / secondsPerYear
-      newBorrows = pool.totalBorrows * (1.0 + interestFactor)
+      borrowInterestFactor = borrowRate * elapsedSeconds / secondsPerYear
+      supplyInterestFactor = borrowRate * utilization * (1.0 - pool.reserveFactor) * elapsedSeconds / secondsPerYear
+      newBorrows = pool.totalBorrows * (1.0 + borrowInterestFactor)
       interestAccrued = newBorrows - pool.totalBorrows
       reserveAccrual = max 0.0 (interestAccrued * pool.reserveFactor)
+      supplierInterest = interestAccrued - reserveAccrual
       newReserves = pool.reserves + reserveAccrual
-      newIndex = pool.accumulatedIndex * (1.0 + interestFactor)
-  in (newBorrows, newReserves, newIndex, borrowRate)
+      newTotalSupply = pool.totalSupply + supplierInterest
+      newSupplyIndex = pool.accumulatedIndex * (1.0 + supplyInterestFactor)
+      newBorrowIndex = pool.borrowIndex * (1.0 + borrowInterestFactor)
+  in (newTotalSupply, newBorrows, newReserves, newSupplyIndex, newBorrowIndex)
 
 -- | Validate pool invariants.
 validatePoolInvariants : LendingPool -> Update ()
@@ -47,9 +53,9 @@ validatePoolInvariants pool = do
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- LENDING POOL - CORE STATE TEMPLATE
+-- All consuming operations live here so operator signatory can archive pool + positions.
 -- ═══════════════════════════════════════════════════════════════════════════
 
--- | Lending pool template with ON-CHAIN interest accrual
 template LendingPool
   with
     operator : Party
@@ -62,7 +68,8 @@ template LendingPool
     rateModel : RateModelParams
     collateralConfig : CollateralConfig
     lastUpdateTime : Time
-    accumulatedIndex : Decimal  -- Accumulated interest index
+    accumulatedIndex : Decimal  -- Supply index (grows at supply rate)
+    borrowIndex : Decimal  -- Borrow index (grows at borrow rate, used for debt)
     pauseCid : ContractId ProtocolPause  -- Reference to pause contract
   where
     signatory operator
@@ -71,7 +78,6 @@ template LendingPool
     -- READ-ONLY QUERIES
     -- ───────────────────────────────────────────────────────────────────────
 
-    -- | Calculate utilization rate
     nonconsuming choice GetUtilization : Decimal
       controller operator
       do
@@ -80,7 +86,6 @@ template LendingPool
           then return 0.0
           else return (totalBorrows / lendableSupply)
 
-    -- | Calculate borrow rate based on kink model
     nonconsuming choice GetBorrowRate : Decimal
       controller operator
       do
@@ -94,30 +99,31 @@ template LendingPool
             return (normalRate + excessUtil * rateModel.jumpMultiplier)
 
     -- ───────────────────────────────────────────────────────────────────────
-    -- ADMIN: Manual interest accrual (optional convenience, not required for correctness)
+    -- ADMIN: Manual interest accrual
     -- ───────────────────────────────────────────────────────────────────────
     choice AccrueInterest : ContractId LendingPool
       controller operator
       do
         now <- getTime
         validatePoolInvariants this
-        let (newBorrows, newReserves, newIndex, _rate) = accrueInterestInternal this now
+        let (newTotalSupply, newBorrows, newReserves, newSupplyIndex, newBorrowIndex) = accrueInterestInternal this now
         create this with
+          totalSupply = newTotalSupply
           totalBorrows = newBorrows
           reserves = newReserves
-          accumulatedIndex = newIndex
+          accumulatedIndex = newSupplyIndex
+          borrowIndex = newBorrowIndex
           lastUpdateTime = now
 
     -- ───────────────────────────────────────────────────────────────────────
-    -- SUPPLY: User deposits assets (NO OPERATOR REQUIRED!)
+    -- SUPPLY: User deposits assets
     -- ───────────────────────────────────────────────────────────────────────
     choice Supply : (ContractId LendingPool, ContractId SupplyPosition, ContractId ActivityRecord)
       with
         supplier : Party
         amount : Decimal
-      controller supplier  -- DECENTRALIZED: Only supplier signs!
+      controller supplier
       do
-        -- Check pause state
         pause <- fetch pauseCid
         assertMsg ("Protocol is paused: " <> pause.reason) (not pause.isPaused)
 
@@ -125,14 +131,14 @@ template LendingPool
         now <- getTime
         assertMsg "Supply amount must be positive" (amount > 0.0)
 
-        -- Accrue interest inline before modifying state
-        let (newBorrows, newReserves, newIndex, _rate) = accrueInterestInternal this now
+        let (newTotalSupply, newBorrows, newReserves, newSupplyIndex, newBorrowIndex) = accrueInterestInternal this now
 
         newPool <- create this with
-          totalSupply = totalSupply + amount
+          totalSupply = newTotalSupply + amount
           totalBorrows = newBorrows
           reserves = newReserves
-          accumulatedIndex = newIndex
+          accumulatedIndex = newSupplyIndex
+          borrowIndex = newBorrowIndex
           lastUpdateTime = now
 
         position <- create SupplyPosition with
@@ -140,7 +146,7 @@ template LendingPool
           supplier
           asset
           amount
-          entryIndex = newIndex
+          entryIndex = newSupplyIndex
           createdAt = now
 
         activity <- create ActivityRecord with
@@ -154,7 +160,7 @@ template LendingPool
         return (newPool, position, activity)
 
     -- ───────────────────────────────────────────────────────────────────────
-    -- BORROW: User borrows with collateral (NO OPERATOR REQUIRED!)
+    -- BORROW: User borrows with collateral
     -- ───────────────────────────────────────────────────────────────────────
     choice Borrow : (ContractId LendingPool, ContractId BorrowPosition, ContractId ActivityRecord)
       with
@@ -163,9 +169,8 @@ template LendingPool
         collateralAmount : Decimal
         oracleCid : ContractId OraclePrice
         collateralOracleCid : ContractId OraclePrice
-      controller borrower  -- DECENTRALIZED: Only borrower signs!
+      controller borrower
       do
-        -- Check pause state
         pause <- fetch pauseCid
         assertMsg ("Protocol is paused: " <> pause.reason) (not pause.isPaused)
 
@@ -175,10 +180,8 @@ template LendingPool
         assertMsg "Collateral amount must be positive" (collateralAmount > 0.0)
         assertMsg "Collateral amount below minimum threshold" (collateralAmount >= 0.01)
 
-        -- Accrue interest inline before modifying state
-        let (newBorrows, newReserves, newIndex, _rate) = accrueInterestInternal this now
+        let (newTotalSupply, newBorrows, newReserves, newSupplyIndex, newBorrowIndex) = accrueInterestInternal this now
 
-        -- Check collateral value vs borrow value
         borrowOracle <- fetch oracleCid
         collateralOracle <- fetch collateralOracleCid
         let borrowOracleAgeSeconds = intToDecimal (convertRelTimeToMicroseconds (subTime now borrowOracle.lastUpdated)) / 1000000.0
@@ -196,15 +199,16 @@ template LendingPool
         assertMsg "Insufficient collateral" (borrowValue <= maxBorrow)
         assertMsg "Insufficient pool liquidity" (borrowAmount <= availableLiquidity)
 
-        -- Check borrow cap (None = unlimited, Some x = capped at x)
         case borrowCap of
           None -> return ()
           Some cap -> assertMsg "Borrow cap exceeded" (newBorrows + borrowAmount <= cap)
 
         newPool <- create this with
+          totalSupply = newTotalSupply
           totalBorrows = newBorrows + borrowAmount
           reserves = newReserves
-          accumulatedIndex = newIndex
+          accumulatedIndex = newSupplyIndex
+          borrowIndex = newBorrowIndex
           lastUpdateTime = now
 
         position <- create BorrowPosition with
@@ -214,7 +218,7 @@ template LendingPool
           borrowAmount
           collateralAsset = collateralConfig.asset
           collateralAmount
-          entryIndex = newIndex
+          entryIndex = newBorrowIndex
           liquidationThreshold = collateralConfig.liquidationThreshold
           createdAt = now
           updatedAt = now
@@ -229,8 +233,215 @@ template LendingPool
 
         return (newPool, position, activity)
 
+    -- ───────────────────────────────────────────────────────────────────────
+    -- REPAY: Borrower repays debt (choice on pool so operator can archive both)
+    -- ───────────────────────────────────────────────────────────────────────
+    choice RepayBorrow : (ContractId LendingPool, Optional (ContractId BorrowPosition), ContractId ActivityRecord)
+      with
+        borrower : Party
+        positionCid : ContractId BorrowPosition
+        repayAmount : Decimal
+      controller borrower
+      do
+        assertMsg "Repay amount must be positive" (repayAmount > 0.0)
+
+        pause <- fetch pauseCid
+        assertMsg ("Protocol is paused: " <> pause.reason) (not pause.isPaused)
+
+        position <- fetch positionCid
+        assertMsg "Pool asset mismatch" (asset == position.borrowAsset)
+        assertMsg "Not position owner" (borrower == position.borrower)
+
+        let currentBorrowIdx = borrowIndex
+        let growthFactor = currentBorrowIdx / position.entryIndex
+        let currentDebt = position.borrowAmount * growthFactor
+        let appliedRepayment = min repayAmount currentDebt
+        let debtAfterRepay = currentDebt - appliedRepayment
+        let newTotalBorrows = max 0.0 (totalBorrows - appliedRepayment)
+
+        archive positionCid
+
+        newPool <- create this with totalBorrows = newTotalBorrows
+
+        now <- getTime
+        residualPosition <-
+          if debtAfterRepay <= dustThreshold
+            then pure None
+            else do
+              residual <- create BorrowPosition with
+                operator = position.operator
+                borrower = position.borrower
+                borrowAsset = position.borrowAsset
+                borrowAmount = debtAfterRepay
+                collateralAsset = position.collateralAsset
+                collateralAmount = position.collateralAmount
+                entryIndex = currentBorrowIdx
+                liquidationThreshold = position.liquidationThreshold
+                createdAt = position.createdAt
+                updatedAt = now
+              pure (Some residual)
+
+        activity <- create ActivityRecord with
+          operator
+          user = borrower
+          activityType = "REPAY"
+          description = "Repaid " <> show appliedRepayment <> " " <> asset <> " (remaining debt " <> show debtAfterRepay <> ")"
+          timestamp = now
+          rewardWeight = appliedRepayment
+
+        pure (newPool, residualPosition, activity)
+
+    -- ───────────────────────────────────────────────────────────────────────
+    -- LIQUIDATE: Anyone can liquidate undercollateralized positions
+    -- Choice on pool so operator signatory can archive both pool and position.
+    -- ───────────────────────────────────────────────────────────────────────
+    choice LiquidateBorrow : (ContractId LendingPool, Optional (ContractId BorrowPosition), ContractId ActivityRecord)
+      with
+        liquidator : Party
+        positionCid : ContractId BorrowPosition
+        borrowOracleCid : ContractId OraclePrice
+        collateralOracleCid : ContractId OraclePrice
+      controller liquidator
+      do
+        now <- getTime
+
+        -- Liquidations intentionally skip pause check to protect lenders
+
+        position <- fetch positionCid
+
+        borrowOracle <- fetch borrowOracleCid
+        collateralOracle <- fetch collateralOracleCid
+
+        let borrowOracleAgeSeconds = intToDecimal (convertRelTimeToMicroseconds (subTime now borrowOracle.lastUpdated)) / 1000000.0
+        let collateralOracleAgeSeconds = intToDecimal (convertRelTimeToMicroseconds (subTime now collateralOracle.lastUpdated)) / 1000000.0
+        assertMsg "Borrow oracle is stale" (borrowOracleAgeSeconds <= collateralConfig.oracleMaxAgeSeconds)
+        assertMsg "Collateral oracle is stale" (collateralOracleAgeSeconds <= collateralConfig.oracleMaxAgeSeconds)
+
+        assertMsg "Borrow oracle price must be positive" (borrowOracle.price > 0.0)
+        assertMsg "Collateral oracle price must be positive" (collateralOracle.price > 0.0)
+        let minOraclePrice = 0.0001
+        assertMsg "Borrow oracle price too low for safe liquidation" (borrowOracle.price >= minOraclePrice)
+        assertMsg "Collateral oracle price too low for safe liquidation" (collateralOracle.price >= minOraclePrice)
+
+        let currentBorrowIdx = borrowIndex
+        let growthFactor = currentBorrowIdx / position.entryIndex
+        let currentDebt = position.borrowAmount * growthFactor
+        let debtValue = currentDebt * borrowOracle.price
+        let collateralValue = position.collateralAmount * collateralOracle.price
+        let healthFactor =
+              if debtValue == 0.0
+                then 999.0
+                else (collateralValue * position.liquidationThreshold) / debtValue
+
+        assertMsg "Position is not liquidatable (health factor >= 1)" (healthFactor < 1.0)
+
+        let effectiveCloseFactor =
+              if healthFactor < criticalHealthFactor
+                then 1.0
+                else collateralConfig.closeFactor
+
+        let liquidationBonusFactor = 1.0 + collateralConfig.liquidationBonus
+        let closeFactorDebtCap = currentDebt * effectiveCloseFactor
+        let maxDebtCoveredByCollateral =
+              if borrowOracle.price <= 0.0
+                then 0.0
+                else collateralValue / (borrowOracle.price * liquidationBonusFactor)
+        let debtRepaid = min closeFactorDebtCap maxDebtCoveredByCollateral
+
+        assertMsg "Collateral has no liquidation value" (debtRepaid > 0.0)
+
+        let debtAfter = currentDebt - debtRepaid
+        let collateralSeized =
+              if collateralOracle.price <= 0.0
+                then position.collateralAmount
+                else (debtRepaid * borrowOracle.price * liquidationBonusFactor) / collateralOracle.price
+        let collateralAfter = max 0.0 (position.collateralAmount - collateralSeized)
+        let newTotalBorrows = max 0.0 (totalBorrows - debtRepaid)
+
+        archive positionCid
+
+        newPool <- create this with totalBorrows = newTotalBorrows
+
+        residualPosition <-
+          if debtAfter <= dustThreshold || collateralAfter <= dustThreshold
+            then pure None
+            else do
+              residual <- create BorrowPosition with
+                operator = position.operator
+                borrower = position.borrower
+                borrowAsset = position.borrowAsset
+                borrowAmount = debtAfter
+                collateralAsset = position.collateralAsset
+                collateralAmount = collateralAfter
+                entryIndex = currentBorrowIdx
+                liquidationThreshold = position.liquidationThreshold
+                createdAt = position.createdAt
+                updatedAt = now
+              pure (Some residual)
+
+        activity <- create ActivityRecord with
+          operator
+          user = liquidator
+          activityType = "LIQUIDATE"
+          description =
+            "Liquidated debt " <> show debtRepaid <> " " <> position.borrowAsset
+              <> " (HF=" <> show healthFactor
+              <> ", residual=" <> show debtAfter
+              <> ", seized=" <> show collateralSeized <> " " <> position.collateralAsset <> ")"
+          timestamp = now
+          rewardWeight = debtRepaid * borrowOracle.price
+
+        pure (newPool, residualPosition, activity)
+
+    -- ───────────────────────────────────────────────────────────────────────
+    -- WITHDRAW: Supplier withdraws deposited assets with accrued interest
+    -- ───────────────────────────────────────────────────────────────────────
+    choice WithdrawSupply : (ContractId LendingPool, ContractId ActivityRecord)
+      with
+        supplier : Party
+        positionCid : ContractId SupplyPosition
+      controller supplier
+      do
+        pause <- fetch pauseCid
+        assertMsg ("Protocol is paused: " <> pause.reason) (not pause.isPaused)
+
+        now <- getTime
+        position <- fetch positionCid
+        assertMsg "Pool asset mismatch" (asset == position.asset)
+        assertMsg "Not position owner" (supplier == position.supplier)
+
+        let (newTotalSupply, newBorrows, newReserves, newSupplyIndex, newBorrowIndex) = accrueInterestInternal this now
+
+        let growthFactor = newSupplyIndex / position.entryIndex
+        let withdrawAmount = position.amount * growthFactor
+
+        -- After withdrawal, remaining supply must cover outstanding borrows (with small rounding tolerance)
+        let supplyAfterWithdraw = newTotalSupply - withdrawAmount
+        assertMsg "Insufficient pool liquidity for withdrawal" (supplyAfterWithdraw + 0.01 >= newBorrows)
+
+        archive positionCid
+
+        newPool <- create this with
+          totalSupply = max 0.0 supplyAfterWithdraw
+          totalBorrows = newBorrows
+          reserves = newReserves
+          accumulatedIndex = newSupplyIndex
+          borrowIndex = newBorrowIndex
+          lastUpdateTime = now
+
+        activity <- create ActivityRecord with
+          operator
+          user = supplier
+          activityType = "WITHDRAW"
+          description = "Withdrew " <> show withdrawAmount <> " " <> asset
+          timestamp = now
+          rewardWeight = withdrawAmount
+
+        return (newPool, activity)
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- SUPPLY POSITION
+-- signatory operator so the pool can archive it during withdrawal
 -- ═══════════════════════════════════════════════════════════════════════════
 
 template SupplyPosition
@@ -242,23 +453,12 @@ template SupplyPosition
     entryIndex : Decimal
     createdAt : Time
   where
-    signatory supplier  -- DECENTRALIZED: Only supplier is signatory
-    observer operator
-
-    choice Withdraw : ()
-      with
-        poolCid : ContractId LendingPool
-      controller supplier
-      do
-        pool <- fetch poolCid
-        -- Calculate accrued interest
-        let growthFactor = pool.accumulatedIndex / entryIndex
-        let _totalAmount = amount * growthFactor
-        -- In a real system, we'd transfer tokens here via CIP-56
-        return ()
+    signatory operator
+    observer supplier
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- BORROW POSITION
+-- signatory operator so the pool can archive it during repay/liquidation
 -- ═══════════════════════════════════════════════════════════════════════════
 
 template BorrowPosition
@@ -274,18 +474,15 @@ template BorrowPosition
     createdAt : Time
     updatedAt : Time
   where
-    signatory borrower  -- DECENTRALIZED: Only borrower is signatory
-    observer operator
+    signatory operator
+    observer borrower
 
-    -- ───────────────────────────────────────────────────────────────────────
-    -- READ-ONLY: Get current health factor
-    -- ───────────────────────────────────────────────────────────────────────
     nonconsuming choice GetHealthFactor : Decimal
       with
         borrowOracleCid : ContractId OraclePrice
         collateralOracleCid : ContractId OraclePrice
         currentIndex : Decimal
-      controller borrower  -- Borrower can check their own health
+      controller borrower
       do
         borrowOracle <- fetch borrowOracleCid
         collateralOracle <- fetch collateralOracleCid
@@ -297,150 +494,3 @@ template BorrowPosition
         if debtValue == 0.0
           then return 999.0
           else return (liquidationValue / debtValue)
-
-    -- ───────────────────────────────────────────────────────────────────────
-    -- REPAY: Borrower repays debt (NO OPERATOR REQUIRED!)
-    -- ───────────────────────────────────────────────────────────────────────
-    choice Repay : (ContractId LendingPool, Optional (ContractId BorrowPosition), ContractId ActivityRecord)
-      with
-        poolCid : ContractId LendingPool
-        repayAmount : Decimal
-      controller borrower  -- DECENTRALIZED: Only borrower signs!
-      do
-        assertMsg "Repay amount must be positive" (repayAmount > 0.0)
-        pool <- fetch poolCid
-        assertMsg "Pool asset mismatch" (pool.asset == borrowAsset)
-
-        -- Check pause state
-        pause <- fetch pool.pauseCid
-        assertMsg ("Protocol is paused: " <> pause.reason) (not pause.isPaused)
-
-        let currentIndex = pool.accumulatedIndex
-        let growthFactor = currentIndex / entryIndex
-        let currentDebt = borrowAmount * growthFactor
-        let appliedRepayment = min repayAmount currentDebt
-        let debtAfterRepay = currentDebt - appliedRepayment
-        let newTotalBorrows = max 0.0 (pool.totalBorrows - appliedRepayment)
-
-        archive poolCid
-        newPool <- create pool with totalBorrows = newTotalBorrows
-
-        now <- getTime
-        residualPosition <-
-          if debtAfterRepay <= dustThreshold
-            then pure None
-            else do
-              residual <- create this with
-                borrowAmount = debtAfterRepay
-                entryIndex = currentIndex
-                updatedAt = now
-              pure (Some residual)
-
-        activity <- create ActivityRecord with
-          operator
-          user = borrower
-          activityType = "REPAY"
-          description = "Repaid " <> show appliedRepayment <> " " <> borrowAsset <> " (remaining debt " <> show debtAfterRepay <> ")"
-          timestamp = now
-          rewardWeight = appliedRepayment
-
-        pure (newPool, residualPosition, activity)
-
-    -- ───────────────────────────────────────────────────────────────────────
-    -- LIQUIDATE: ANYONE can liquidate undercollateralized positions!
-    -- This creates a competitive liquidation market like Aave/Compound
-    -- ───────────────────────────────────────────────────────────────────────
-    choice Liquidate : (ContractId LendingPool, Optional (ContractId BorrowPosition), ContractId ActivityRecord)
-      with
-        liquidator : Party
-        poolCid : ContractId LendingPool
-        borrowOracleCid : ContractId OraclePrice
-        collateralOracleCid : ContractId OraclePrice
-      controller liquidator  -- DECENTRALIZED: ANYONE can liquidate!
-      do
-        now <- getTime
-        pool <- fetch poolCid
-
-        -- Pause check (liquidations should work even when paused to protect lenders)
-        -- So we intentionally do NOT check pause state here
-
-        borrowOracle <- fetch borrowOracleCid
-        collateralOracle <- fetch collateralOracleCid
-
-        -- Oracle staleness check
-        let borrowOracleAgeSeconds = intToDecimal (convertRelTimeToMicroseconds (subTime now borrowOracle.lastUpdated)) / 1000000.0
-        let collateralOracleAgeSeconds = intToDecimal (convertRelTimeToMicroseconds (subTime now collateralOracle.lastUpdated)) / 1000000.0
-        assertMsg "Borrow oracle is stale" (borrowOracleAgeSeconds <= pool.collateralConfig.oracleMaxAgeSeconds)
-        assertMsg "Collateral oracle is stale" (collateralOracleAgeSeconds <= pool.collateralConfig.oracleMaxAgeSeconds)
-
-        -- Oracle price sanity check (prevent near-zero price exploits)
-        assertMsg "Borrow oracle price must be positive" (borrowOracle.price > 0.0)
-        assertMsg "Collateral oracle price must be positive" (collateralOracle.price > 0.0)
-        let minOraclePrice = 0.0001
-        assertMsg "Borrow oracle price too low for safe liquidation" (borrowOracle.price >= minOraclePrice)
-        assertMsg "Collateral oracle price too low for safe liquidation" (collateralOracle.price >= minOraclePrice)
-
-        -- Calculate current debt with accrued interest
-        let currentIndex = pool.accumulatedIndex
-        let growthFactor = currentIndex / entryIndex
-        let currentDebt = borrowAmount * growthFactor
-        let debtValue = currentDebt * borrowOracle.price
-        let collateralValue = collateralAmount * collateralOracle.price
-        let healthFactor =
-              if debtValue == 0.0
-                then 999.0
-                else (collateralValue * liquidationThreshold) / debtValue
-
-        assertMsg "Position is not liquidatable (health factor >= 1)" (healthFactor < 1.0)
-
-        -- ENHANCED: Allow full liquidation for critically underwater positions
-        let effectiveCloseFactor =
-              if healthFactor < criticalHealthFactor
-                then 1.0  -- Full liquidation allowed
-                else pool.collateralConfig.closeFactor
-
-        let liquidationBonusFactor = 1.0 + pool.collateralConfig.liquidationBonus
-        let closeFactorDebtCap = currentDebt * effectiveCloseFactor
-        let maxDebtCoveredByCollateral =
-              if borrowOracle.price <= 0.0
-                then 0.0
-                else collateralValue / (borrowOracle.price * liquidationBonusFactor)
-        let debtRepaid = min closeFactorDebtCap maxDebtCoveredByCollateral
-
-        assertMsg "Collateral has no liquidation value" (debtRepaid > 0.0)
-
-        let debtAfter = currentDebt - debtRepaid
-        let collateralSeized =
-              if collateralOracle.price <= 0.0
-                then collateralAmount
-                else (debtRepaid * borrowOracle.price * liquidationBonusFactor) / collateralOracle.price
-        let collateralAfter = max 0.0 (collateralAmount - collateralSeized)
-        let newTotalBorrows = max 0.0 (pool.totalBorrows - debtRepaid)
-
-        archive poolCid
-        newPool <- create pool with totalBorrows = newTotalBorrows
-
-        residualPosition <-
-          if debtAfter <= dustThreshold || collateralAfter <= dustThreshold
-            then pure None
-            else do
-              residual <- create this with
-                borrowAmount = debtAfter
-                collateralAmount = collateralAfter
-                entryIndex = currentIndex
-                updatedAt = now
-              pure (Some residual)
-
-        activity <- create ActivityRecord with
-          operator
-          user = liquidator
-          activityType = "LIQUIDATE"
-          description =
-            "Liquidated debt " <> show debtRepaid <> " " <> borrowAsset
-              <> " (HF=" <> show healthFactor
-              <> ", residual=" <> show debtAfter
-              <> ", seized=" <> show collateralSeized <> " " <> collateralAsset <> ")"
-          timestamp = now
-          rewardWeight = debtRepaid * borrowOracle.price
-
-        pure (newPool, residualPosition, activity)

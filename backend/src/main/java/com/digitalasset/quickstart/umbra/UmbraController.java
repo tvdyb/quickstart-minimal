@@ -160,6 +160,7 @@ public class UmbraController {
                             )),
                             field("lastUpdateTime", timestampVal(System.currentTimeMillis() * 1000)),
                             field("accumulatedIndex", numericVal(1.0)),
+                            field("borrowIndex", numericVal(1.0)),
                             field("pauseCid", contractIdVal(pauseCid))
                     ), operator).get();
                     created.put("LendingPool", "created");
@@ -553,16 +554,17 @@ public class UmbraController {
         return repo.getLendingPool()
                 .map(pool -> {
                     String poolContractId = (String) pool.get("contractId");
-                    ValueOuterClass.Value poolAwareArg = recordVal(
-                            field("poolCid", contractIdVal(poolContractId)),
+                    ValueOuterClass.Value choiceArg = recordVal(
+                            field("borrower", partyVal(borrower)),
+                            field("positionCid", contractIdVal(contractId)),
                             field("repayAmount", numericVal(repayAmount))
                     );
                     return ledger.exerciseChoice(
-                            contractId,
-                            "Umbra.Lending", "BorrowPosition",
-                            "Repay",
-                            poolAwareArg,
-                            borrower  // ✅ Only borrower signs
+                            poolContractId,
+                            "Umbra.Lending", "LendingPool",
+                            "RepayBorrow",
+                            choiceArg,
+                            borrower
                     ).thenApply(tx -> ResponseEntity.ok(Map.<String, Object>of(
                             "status", "repaid",
                             "transactionId", tx.getUpdateId()
@@ -621,16 +623,16 @@ public class UmbraController {
                     String poolCid = (String) pool.get("contractId");
                     ValueOuterClass.Value choiceArg = recordVal(
                             field("liquidator", partyVal(liquidator)),
-                            field("poolCid", contractIdVal(poolCid)),
+                            field("positionCid", contractIdVal(positionId)),
                             field("borrowOracleCid", contractIdVal(finalBorrowOracleCid)),
                             field("collateralOracleCid", contractIdVal(finalCollateralOracleCid))
                     );
                     return ledger.exerciseChoice(
-                            positionId,
-                            "Umbra.Lending", "BorrowPosition",
-                            "Liquidate",
+                            poolCid,
+                            "Umbra.Lending", "LendingPool",
+                            "LiquidateBorrow",
                             choiceArg,
-                            liquidator  // ✅ Any party can liquidate
+                            liquidator
                     ).thenApply(tx -> ResponseEntity.ok(Map.<String, Object>of(
                             "status", "liquidated",
                             "transactionId", tx.getUpdateId(),
