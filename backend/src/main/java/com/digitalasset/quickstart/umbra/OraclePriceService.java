@@ -14,6 +14,15 @@ import static com.digitalasset.quickstart.umbra.ProtoHelper.*;
 
 /**
  * Oracle price service. Updates CC/USD price every 5 minutes.
+ *
+ * ⚠️ WARNING: MOCK MODE - DO NOT USE IN PRODUCTION ⚠️
+ *
+ * This service generates RANDOM PRICES for development/testing only.
+ * In production, this MUST be replaced with:
+ * - Real market data feeds (Chainlink, RedStone, etc.)
+ * - Multi-oracle aggregation (median of 3+ sources)
+ * - Price bounds validation (implemented in DAML OraclePrice template)
+ *
  * For DevNet MVP: mock price fluctuating around $0.16 +/- $0.01.
  */
 @Component
@@ -22,6 +31,10 @@ public class OraclePriceService {
     private static final Logger logger = LoggerFactory.getLogger(OraclePriceService.class);
     private static final double BASE_PRICE = 0.16;
     private static final double PRICE_VARIANCE = 0.01;
+
+    // TODO: Add production mode flag that disables mock prices
+    // @Value("${umbra.oracle.mockMode:true}")
+    // private boolean mockMode;
 
     private final UmbraRepository repo;
     private final UmbraLedgerClient ledger;

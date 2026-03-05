@@ -1,5 +1,29 @@
 module Umbra.Types where
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- CONSTANTS
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- | Dust threshold - amounts below this are considered negligible and positions are closed
+dustThreshold : Decimal
+dustThreshold = 0.0000001
+
+-- | Seconds per year for APY calculations
+secondsPerYear : Decimal
+secondsPerYear = 31536000.0
+
+-- | Maximum allowed liquidation bonus (20%)
+maxLiquidationBonus : Decimal
+maxLiquidationBonus = 0.20
+
+-- | Critical health factor threshold - below this, allow full liquidation
+criticalHealthFactor : Decimal
+criticalHealthFactor = 0.90
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- BASIC TYPES
+-- ═══════════════════════════════════════════════════════════════════════════
+
 -- | Asset identifier (e.g., "BTC", "ETH", "USDC", "CC")
 type Asset = Text
 
@@ -17,6 +41,10 @@ type Price = Decimal
 -- | Quantity as Decimal
 type Quantity = Decimal
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- RATE MODEL
+-- ═══════════════════════════════════════════════════════════════════════════
+
 -- | Rate model parameters (kink-based, similar to Aave/Compound)
 data RateModelParams = RateModelParams
   with
@@ -25,6 +53,10 @@ data RateModelParams = RateModelParams
     jumpMultiplier : Decimal  -- Rate slope above kink
     kink : Decimal            -- Utilization kink point (e.g., 0.80 = 80%)
   deriving (Eq, Show)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- COLLATERAL CONFIGURATION
+-- ═══════════════════════════════════════════════════════════════════════════
 
 -- | Collateral configuration
 data CollateralConfig = CollateralConfig
@@ -47,3 +79,29 @@ defaultCCCollateral = CollateralConfig
     liquidationBonus = 0.05
     closeFactor = 0.50
     oracleMaxAgeSeconds = 3600.0
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- PROTOCOL PAUSE (EMERGENCY CIRCUIT BREAKER)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- | Protocol-wide emergency pause controlled by governance/operator
+template ProtocolPause
+  with
+    operator : Party
+    isPaused : Bool
+    reason : Text
+    pausedAt : Optional Time
+  where
+    signatory operator
+
+    choice SetPauseState : ContractId ProtocolPause
+      with
+        newPauseState : Bool
+        newReason : Text
+      controller operator
+      do
+        now <- getTime
+        create this with
+          isPaused = newPauseState
+          reason = newReason
+          pausedAt = if newPauseState then Some now else None

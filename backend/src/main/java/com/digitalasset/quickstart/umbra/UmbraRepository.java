@@ -106,21 +106,59 @@ public class UmbraRepository {
     }
 
     /**
-     * Get trade confirms for a specific trader.
+     * Get buyer confirmations for a specific buyer.
+     * PRIVACY: Only returns trades where this party was the buyer.
      */
-    public List<Map<String, Object>> getTradesForTrader(String trader) {
-        String sql = "SELECT contract_id, payload FROM active(?) WHERE payload->>'buyer' = ? OR payload->>'seller' = ?";
+    public List<Map<String, Object>> getBuyerConfirms(String buyer) {
+        String sql = "SELECT contract_id, payload FROM active(?) WHERE payload->>'buyer' = ?";
         try {
             return jdbc.query(sql, (rs, i) -> {
                 Map<String, Object> row = new HashMap<>();
                 row.put("contractId", rs.getString("contract_id"));
                 row.put("payload", parseJson(rs.getString("payload")));
+                row.put("side", "buy");  // Mark as buy side
                 return row;
-            }, TRADE_CONFIRM_TEMPLATE, trader, trader);
+            }, BUYER_CONFIRM_TEMPLATE, buyer);
         } catch (Exception e) {
-            logger.debug("TradeConfirm template not yet available in PQS", e);
+            logger.debug("BuyerConfirm template not yet available in PQS", e);
             return List.of();
         }
+    }
+
+    /**
+     * Get seller confirmations for a specific seller.
+     * PRIVACY: Only returns trades where this party was the seller.
+     */
+    public List<Map<String, Object>> getSellerConfirms(String seller) {
+        String sql = "SELECT contract_id, payload FROM active(?) WHERE payload->>'seller' = ?";
+        try {
+            return jdbc.query(sql, (rs, i) -> {
+                Map<String, Object> row = new HashMap<>();
+                row.put("contractId", rs.getString("contract_id"));
+                row.put("payload", parseJson(rs.getString("payload")));
+                row.put("side", "sell");  // Mark as sell side
+                return row;
+            }, SELLER_CONFIRM_TEMPLATE, seller);
+        } catch (Exception e) {
+            logger.debug("SellerConfirm template not yet available in PQS", e);
+            return List.of();
+        }
+    }
+
+    /**
+     * Get all trade confirmations for a trader (both as buyer and seller).
+     * PRIVACY: Each party only sees their own side - no counterparty information exposed.
+     */
+    public List<Map<String, Object>> getTradesForTrader(String trader) {
+        List<Map<String, Object>> trades = new ArrayList<>();
+
+        // Get buyer confirms (trades where this party bought)
+        trades.addAll(getBuyerConfirms(trader));
+
+        // Get seller confirms (trades where this party sold)
+        trades.addAll(getSellerConfirms(trader));
+
+        return trades;
     }
 
     // ── Lending ────────────────────────────────────────────

@@ -60,27 +60,20 @@ public class UmbraController {
 
     /**
      * POST /api/orders → Create a new SpotOrder
-     * Body: { trader?, baseAsset?, quoteAsset?, side, price, quantity }
+     * Body: { baseAsset?, quoteAsset?, side, price, quantity }
+     * NOTE: Dark pool order creation still requires operator involvement for matching,
+     * but any authenticated trader can submit orders.
      */
     @PostMapping("/orders")
     public CompletableFuture<ResponseEntity<Map<String, Object>>> createOrder(@RequestBody Map<String, Object> body) {
-        ResponseEntity<Map<String, Object>> guard = requireOperatorSession("Create order");
-        if (guard != null) {
-            return CompletableFuture.completedFuture(guard);
-        }
-
-        final String trader = getPartyFromBodyOrAuth(body.get("trader"));
+        // ✅ User must be authenticated, but doesn't need to BE the operator
+        final String trader = authenticatedPartyProvider.getPartyOrFail();
         final String baseAsset = String.valueOf(body.getOrDefault("baseAsset", "CC"));
         final String quoteAsset = String.valueOf(body.getOrDefault("quoteAsset", "USDC"));
         final String side = normalizeSide(String.valueOf(body.getOrDefault("side", "Buy")));
         final double price = parseDouble(body.get("price"));
         final double quantity = parseDouble(body.get("quantity"));
 
-        if (trader == null || trader.isBlank()) {
-            return CompletableFuture.completedFuture(
-                    ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Trader party not found"))
-            );
-        }
         if (price <= 0.0) {
             return CompletableFuture.completedFuture(
                     ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Price must be positive"))
@@ -93,6 +86,8 @@ public class UmbraController {
         }
 
         // Exercise CreateOrder on the DarkPoolOperator
+        // NOTE: This still requires operator + trader authorization in DAML
+        // This is reasonable for a dark pool where operator facilitates matching
         return repo.getDarkPoolOperator()
                 .map(op -> {
                     String opContractId = (String) op.get("contractId");
@@ -171,9 +166,12 @@ public class UmbraController {
      * GET /api/trades/:trader → Trade confirms for a specific trader
      */
     @GetMapping("/trades/{trader}")
-    public ResponseEntity<List<Map<String, Object>>> getTrades(@PathVariable String trader) {
+    public ResponseEntity<?> getTrades(@PathVariable String trader) {
         if (!canAccessPartyScope(trader)) {
-            return ResponseEntity.status(403).body(List.of());
+            return forbiddenPartyScopeResponse(
+                    "Can only view your own trades unless logged in as app-provider/operator.",
+                    trader
+            );
         }
         try {
             List<Map<String, Object>> rows = repo.getTradesForTrader(trader);
@@ -186,7 +184,7 @@ public class UmbraController {
     }
 
     @GetMapping("/trades/me")
-    public ResponseEntity<List<Map<String, Object>>> getMyTrades() {
+    public ResponseEntity<?> getMyTrades() {
         String trader = authenticatedPartyProvider.getPartyOrFail();
         return getTrades(trader);
     }
@@ -240,46 +238,34 @@ public class UmbraController {
 
     /**
      * POST /api/pool/supply → Supply assets to the lending pool
-     * Body: { supplier, amount }
+     * Body: { amount }
+     * DECENTRALIZED: User supplies directly without operator co-signature
      */
     @PostMapping("/pool/supply")
     public CompletableFuture<ResponseEntity<Map<String, Object>>> supply(@RequestBody Map<String, Object> body) {
-        ResponseEntity<Map<String, Object>> guard = requireOperatorSession("Supply");
-        if (guard != null) {
-            return CompletableFuture.completedFuture(guard);
-        }
-
-        String supplier = getPartyFromBodyOrAuth(body.get("supplier"));
-        if (supplier == null || supplier.isBlank()) {
-            supplier = getPartyFromBodyOrAuth(body.get("trader"));
-        }
+        // ✅ DECENTRALIZED: No operator session required!
+        String supplier = authenticatedPartyProvider.getPartyOrFail();
         double amount = parseDouble(body.get("amount"));
-        if (supplier == null || supplier.isBlank()) {
-            return CompletableFuture.completedFuture(
-                    ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Supplier party not found"))
-            );
-        }
+
         if (amount <= 0.0) {
             return CompletableFuture.completedFuture(
                     ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Supply amount must be positive"))
             );
         }
-        final String supplierParty = supplier;
-        final double supplyAmount = amount;
 
         return repo.getLendingPool()
                 .map(pool -> {
                     String poolCid = (String) pool.get("contractId");
                     ValueOuterClass.Value choiceArg = recordVal(
-                            field("supplier", partyVal(supplierParty)),
-                            field("amount", numericVal(supplyAmount))
+                            field("supplier", partyVal(supplier)),
+                            field("amount", numericVal(amount))
                     );
-                    return ledger.exerciseChoiceMulti(
+                    return ledger.exerciseChoice(
                             poolCid,
                             "Umbra.Lending", "LendingPool",
                             "Supply",
                             choiceArg,
-                            List.of(config.getOperatorParty(), supplierParty)
+                            supplier  // ✅ Only supplier signs
                     ).thenApply(tx -> ResponseEntity.ok(Map.<String, Object>of(
                             "status", "supplied",
                             "transactionId", tx.getUpdateId()
@@ -295,19 +281,14 @@ public class UmbraController {
 
     /**
      * POST /api/pool/borrow → Borrow from the lending pool
-     * Body: { borrower, borrowAmount, collateralAmount, oracleCid, collateralOracleCid }
+     * Body: { borrowAmount, collateralAmount, oracleCid?, collateralOracleCid? }
+     * DECENTRALIZED: User borrows directly without operator co-signature
      */
     @PostMapping("/pool/borrow")
     public CompletableFuture<ResponseEntity<Map<String, Object>>> borrow(@RequestBody Map<String, Object> body) {
-        ResponseEntity<Map<String, Object>> guard = requireOperatorSession("Borrow");
-        if (guard != null) {
-            return CompletableFuture.completedFuture(guard);
-        }
+        // ✅ DECENTRALIZED: No operator session required!
+        String borrower = authenticatedPartyProvider.getPartyOrFail();
 
-        String borrower = getPartyFromBodyOrAuth(body.get("borrower"));
-        if (borrower == null || borrower.isBlank()) {
-            borrower = getPartyFromBodyOrAuth(body.get("trader"));
-        }
         double borrowAmount = parseDouble(body.get("borrowAmount"));
         if (borrowAmount == 0.0) {
             borrowAmount = parseDouble(body.get("amount"));
@@ -325,11 +306,7 @@ public class UmbraController {
         if (collateralOracleCid == null || collateralOracleCid.isBlank()) {
             collateralOracleCid = repo.getOraclePrice("CC").map(v -> (String) v.get("contractId")).orElse(null);
         }
-        if (borrower == null || borrower.isBlank()) {
-            return CompletableFuture.completedFuture(
-                    ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Borrower party not found"))
-            );
-        }
+
         if (borrowAmount <= 0.0) {
             return CompletableFuture.completedFuture(
                     ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Borrow amount must be positive"))
@@ -345,9 +322,7 @@ public class UmbraController {
                     ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Oracle contracts not initialized"))
             );
         }
-        final String borrowerParty = borrower;
-        final double requestedBorrowAmount = borrowAmount;
-        final double requestedCollateralAmount = collateralAmount;
+
         final String borrowOracleCid = oracleCid;
         final String collateralPriceOracleCid = collateralOracleCid;
 
@@ -355,18 +330,18 @@ public class UmbraController {
                 .map(pool -> {
                     String poolCid = (String) pool.get("contractId");
                     ValueOuterClass.Value choiceArg = recordVal(
-                            field("borrower", partyVal(borrowerParty)),
-                            field("borrowAmount", numericVal(requestedBorrowAmount)),
-                            field("collateralAmount", numericVal(requestedCollateralAmount)),
+                            field("borrower", partyVal(borrower)),
+                            field("borrowAmount", numericVal(borrowAmount)),
+                            field("collateralAmount", numericVal(collateralAmount)),
                             field("oracleCid", contractIdVal(borrowOracleCid)),
                             field("collateralOracleCid", contractIdVal(collateralPriceOracleCid))
                     );
-                    return ledger.exerciseChoiceMulti(
+                    return ledger.exerciseChoice(
                             poolCid,
                             "Umbra.Lending", "LendingPool",
                             "Borrow",
                             choiceArg,
-                            List.of(config.getOperatorParty(), borrowerParty)
+                            borrower  // ✅ Only borrower signs
                     ).thenApply(tx -> ResponseEntity.ok(Map.<String, Object>of(
                             "status", "borrowed",
                             "transactionId", tx.getUpdateId()
@@ -382,14 +357,13 @@ public class UmbraController {
 
     /**
      * POST /api/pool/repay → Repay a borrow position
-     * Body: { contractId, repayAmount }
+     * Body: { contractId (or positionId), repayAmount (or amount) }
+     * DECENTRALIZED: User repays directly without operator co-signature
      */
     @PostMapping("/pool/repay")
     public CompletableFuture<ResponseEntity<Map<String, Object>>> repay(@RequestBody Map<String, Object> body) {
-        ResponseEntity<Map<String, Object>> guard = requireOperatorSession("Repay");
-        if (guard != null) {
-            return CompletableFuture.completedFuture(guard);
-        }
+        // ✅ DECENTRALIZED: No operator session required!
+        String borrower = authenticatedPartyProvider.getPartyOrFail();
 
         String contractId = body.get("contractId") == null
                 ? String.valueOf(body.getOrDefault("positionId", ""))
@@ -398,15 +372,7 @@ public class UmbraController {
         if (repayAmount == 0.0) {
             repayAmount = parseDouble(body.get("amount"));
         }
-        String borrower = getPartyFromBodyOrAuth(body.get("borrower"));
-        if (borrower == null || borrower.isBlank()) {
-            borrower = getPartyFromBodyOrAuth(body.get("trader"));
-        }
-        if (borrower == null || borrower.isBlank()) {
-            return CompletableFuture.completedFuture(
-                    ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Borrower party not found"))
-            );
-        }
+
         if (contractId == null || contractId.isBlank()) {
             return CompletableFuture.completedFuture(
                     ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Position contract id is required"))
@@ -417,23 +383,20 @@ public class UmbraController {
                     ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Repay amount must be positive"))
             );
         }
-        final String borrowerParty = borrower;
-        final double requestedRepayAmount = repayAmount;
-        final String positionContractId = contractId;
 
         return repo.getLendingPool()
                 .map(pool -> {
                     String poolContractId = (String) pool.get("contractId");
                     ValueOuterClass.Value poolAwareArg = recordVal(
                             field("poolCid", contractIdVal(poolContractId)),
-                            field("repayAmount", numericVal(requestedRepayAmount))
+                            field("repayAmount", numericVal(repayAmount))
                     );
-                    return ledger.exerciseChoiceMulti(
-                            positionContractId,
+                    return ledger.exerciseChoice(
+                            contractId,
                             "Umbra.Lending", "BorrowPosition",
                             "Repay",
                             poolAwareArg,
-                            List.of(config.getOperatorParty(), borrowerParty)
+                            borrower  // ✅ Only borrower signs
                     ).thenApply(tx -> ResponseEntity.ok(Map.<String, Object>of(
                             "status", "repaid",
                             "transactionId", tx.getUpdateId()
@@ -448,20 +411,85 @@ public class UmbraController {
     }
 
     /**
+     * POST /api/pool/liquidate → Liquidate an undercollateralized position
+     * Body: { positionId, borrowOracleCid?, collateralOracleCid? }
+     * DECENTRALIZED: ANY authenticated user can call this to earn liquidation bonus
+     */
+    @PostMapping("/pool/liquidate")
+    public CompletableFuture<ResponseEntity<Map<String, Object>>> liquidate(@RequestBody Map<String, Object> body) {
+        // ✅ DECENTRALIZED: Any authenticated user can liquidate!
+        String liquidator = authenticatedPartyProvider.getPartyOrFail();
+
+        String positionId = String.valueOf(body.getOrDefault("positionId", ""));
+        if (positionId.isBlank()) {
+            positionId = String.valueOf(body.getOrDefault("contractId", ""));
+        }
+        String borrowOracleCid = body.get("borrowOracleCid") == null ? null : String.valueOf(body.get("borrowOracleCid"));
+        String collateralOracleCid = body.get("collateralOracleCid") == null ? null : String.valueOf(body.get("collateralOracleCid"));
+
+        // Auto-fetch oracle cids if not provided
+        if (borrowOracleCid == null || borrowOracleCid.isBlank()) {
+            borrowOracleCid = repo.getOraclePrice("USDC").map(v -> (String) v.get("contractId")).orElse(null);
+        }
+        if (collateralOracleCid == null || collateralOracleCid.isBlank()) {
+            collateralOracleCid = repo.getOraclePrice("CC").map(v -> (String) v.get("contractId")).orElse(null);
+        }
+
+        if (positionId.isBlank()) {
+            return CompletableFuture.completedFuture(
+                    ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Position ID is required"))
+            );
+        }
+        if (borrowOracleCid == null || collateralOracleCid == null) {
+            return CompletableFuture.completedFuture(
+                    ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Oracle contracts not initialized"))
+            );
+        }
+
+        final String finalBorrowOracleCid = borrowOracleCid;
+        final String finalCollateralOracleCid = collateralOracleCid;
+
+        return repo.getLendingPool()
+                .map(pool -> {
+                    String poolCid = (String) pool.get("contractId");
+                    ValueOuterClass.Value choiceArg = recordVal(
+                            field("liquidator", partyVal(liquidator)),
+                            field("poolCid", contractIdVal(poolCid)),
+                            field("borrowOracleCid", contractIdVal(finalBorrowOracleCid)),
+                            field("collateralOracleCid", contractIdVal(finalCollateralOracleCid))
+                    );
+                    return ledger.exerciseChoice(
+                            positionId,
+                            "Umbra.Lending", "BorrowPosition",
+                            "Liquidate",
+                            choiceArg,
+                            liquidator  // ✅ Any party can liquidate
+                    ).thenApply(tx -> ResponseEntity.ok(Map.<String, Object>of(
+                            "status", "liquidated",
+                            "transactionId", tx.getUpdateId(),
+                            "liquidator", liquidator
+                    ))).exceptionally(e -> {
+                        logger.error("Liquidation failed", e);
+                        return mapLedgerWriteFailure("Liquidate", e);
+                    });
+                })
+                .orElse(CompletableFuture.completedFuture(
+                        ResponseEntity.badRequest().body(Map.<String, Object>of("error", "LendingPool not found"))
+                ));
+    }
+
+    /**
      * GET /api/positions/:trader → Supply + Borrow positions for trader
      */
     @GetMapping("/positions/{trader}")
     public ResponseEntity<Map<String, Object>> getPositions(@PathVariable String trader) {
         if (!canAccessPartyScope(trader)) {
-            String authenticatedParty = authenticatedPartyProvider.getParty().orElse("");
-            String operatorParty = config.getOperatorParty() == null ? "" : config.getOperatorParty();
-            return ResponseEntity.status(403).body(Map.of(
-                    "error", "Can only view your own positions unless logged in as app-provider/operator.",
-                    "code", "FORBIDDEN_PARTY_SCOPE",
-                    "requestedParty", trader,
-                    "authenticatedParty", authenticatedParty,
-                    "operatorParty", operatorParty
-            ));
+            return ResponseEntity.status(403).body(
+                    forbiddenPartyScopeMap(
+                            "Can only view your own positions unless logged in as app-provider/operator.",
+                            trader
+                    )
+            );
         }
         try {
             List<Map<String, Object>> supply = repo.getSupplyPositions(trader).stream().map(this::mapSupplyPosition).toList();
@@ -526,6 +554,22 @@ public class UmbraController {
         String authenticatedParty = authenticatedPartyProvider.getPartyOrFail();
         String operatorParty = config.getOperatorParty() == null ? "" : config.getOperatorParty();
         return authenticatedParty.equals(requestedParty) || authenticatedParty.equals(operatorParty);
+    }
+
+    private ResponseEntity<Map<String, Object>> forbiddenPartyScopeResponse(String message, String requestedParty) {
+        return ResponseEntity.status(403).body(forbiddenPartyScopeMap(message, requestedParty));
+    }
+
+    private Map<String, Object> forbiddenPartyScopeMap(String message, String requestedParty) {
+        String authenticatedParty = authenticatedPartyProvider.getParty().orElse("");
+        String operatorParty = config.getOperatorParty() == null ? "" : config.getOperatorParty();
+        return Map.of(
+                "error", message,
+                "code", "FORBIDDEN_PARTY_SCOPE",
+                "requestedParty", requestedParty,
+                "authenticatedParty", authenticatedParty,
+                "operatorParty", operatorParty
+        );
     }
 
     private ResponseEntity<Map<String, Object>> requireOperatorSession(String action) {
@@ -621,8 +665,9 @@ public class UmbraController {
     private Map<String, Object> mapTrade(Map<String, Object> row, String viewerParty) {
         @SuppressWarnings("unchecked")
         Map<String, Object> payload = (Map<String, Object>) row.get("payload");
-        String buyer = String.valueOf(payload.getOrDefault("buyer", ""));
-        String side = buyer.equals(viewerParty) ? "buy" : "sell";
+        // ✅ PRIVACY: Side is already marked by UmbraRepository (buy or sell)
+        // No counterparty information is exposed
+        String side = String.valueOf(row.getOrDefault("side", "buy"));
         return Map.<String, Object>of(
                 "id", String.valueOf(row.get("contractId")),
                 "price", parseDouble(payload.get("price")),

@@ -1,6 +1,6 @@
 # Umbra Quickstart — Local Build/Run Runbook
 
-_Last updated: 2026-02-24 (CST)_
+_Last updated: 2026-03-04 (CST)_
 
 ## 1) What this runbook gives you
 A reproducible way to:
@@ -15,8 +15,8 @@ Also includes known blockers seen on this machine (Mac mini) and fixes.
 ---
 
 ## 2) Environment baseline (this machine)
-- Repo: `~/projects/umbra/quickstart`
-- Java: Homebrew OpenJDK 17 at `/opt/homebrew/opt/openjdk@17`
+- Repo: `/Users/wilsonw/cn-quickstart/quickstart-minimal`
+- Java: Homebrew OpenJDK 21 at `/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home`
 - DAML: installed (`~/.daml/bin/daml`, SDK 3.4.10)
 - Docker: installed and reachable
 - Node: installed
@@ -42,17 +42,17 @@ node --version
 ## 3) One-shot local bootstrap
 
 ```bash
-cd ~/projects/umbra/quickstart
+cd /Users/wilsonw/cn-quickstart/quickstart-minimal
 make setup
 make build
 make start
 ```
 
 ### Notes from actual setup prompts used
-- Observability: `n` (disabled)
-- OAuth2: default (`on`)
-- Party hint: default
-- Test mode: default (`off`)
+- Observability: `y` (enabled)
+- OAuth2: `y`
+- Party hint: default `quickstart-<user>-1` format
+- Test mode: optional (`y` for local testing)
 
 ---
 
@@ -60,13 +60,13 @@ make start
 
 ### Container/process view
 ```bash
-cd ~/projects/umbra/quickstart
+cd /Users/wilsonw/cn-quickstart/quickstart-minimal
 make status
 ```
 
 ### Logs
 ```bash
-cd ~/projects/umbra/quickstart
+cd /Users/wilsonw/cn-quickstart/quickstart-minimal
 make logs
 # or
 make tail
@@ -86,52 +86,20 @@ curl -I http://localhost:9090
 
 ---
 
-## 5) What has already succeeded
-- `make setup` completed successfully
-- `make build` completed core builds successfully (frontend + backend + DAML compilation)
-- DAML packages compiled (including quickstart licensing DARs)
+## 5) Fastest recovery if stack is messy/conflicting
 
----
-
-## 6) Current blocker observed
-On this OpenClaw runtime, long Docker build/start commands were interrupted with `SIGKILL` during `make start`/docker build phases.
-
-Observed pattern:
-- build stages begin normally
-- process receives external kill before full stack comes up
-
-This appears to be execution/runtime interruption, not a deterministic compile error in the project itself.
-
----
-
-## 7) Fastest workaround if start is interrupted
-Run start directly in an interactive terminal (outside constrained exec), then tail logs:
+Use the dedicated reset target before start:
 
 ```bash
-cd ~/projects/umbra/quickstart
-export JAVA_HOME=/opt/homebrew/opt/openjdk@17
+cd /Users/wilsonw/cn-quickstart/quickstart-minimal
+export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 export PATH="$JAVA_HOME/bin:$HOME/.daml/bin:$PATH"
-make start
-```
-
-In second terminal:
-
-```bash
-cd ~/projects/umbra/quickstart
-make tail
-```
-
-If partial state got stuck:
-
-```bash
-cd ~/projects/umbra/quickstart
-make stop
-make start
+make fresh-start
 ```
 
 ---
 
-## 8) Definition of done (local)
+## 6) Definition of done (local)
 Local is considered green when all are true:
 1. `make start` exits successfully (or stays up as intended)
 2. `make status` shows expected services healthy
@@ -141,7 +109,7 @@ Local is considered green when all are true:
 
 ---
 
-## 9) Files to check if anything drifts
+## 7) Files to check if anything drifts
 - `Makefile`
 - `compose.yaml`
 - `.env.local`
@@ -150,12 +118,12 @@ Local is considered green when all are true:
 
 ---
 
-## 10) Debug / Ledger smoke-check
+## 8) Debug / Ledger smoke-check
 
 Once the stack is up, verify backend diagnostics:
 
 ```bash
-cd ~/projects/umbra/quickstart
+cd /Users/wilsonw/cn-quickstart/quickstart-minimal
 ./scripts/smoke-debug-ledger.sh http://localhost:8080
 ```
 
@@ -168,3 +136,14 @@ Or through the frontend proxy:
 Also verify the in-app page:
 
 - `http://app-provider.localhost:3000/debug`
+
+---
+
+## 9) Dark pool privacy smoke-check
+
+Verify unauthenticated users cannot read protected dark-pool endpoints:
+
+```bash
+cd /Users/wilsonw/cn-quickstart/quickstart-minimal
+make smoke-dark-pool-privacy
+```

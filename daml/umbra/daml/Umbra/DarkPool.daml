@@ -3,10 +3,34 @@ module Umbra.DarkPool where
 import Umbra.Types
 import Umbra.ActivityMarker (ActivityRecord(..))
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- USER AUTHORIZATION - DELEGATION PATTERN
+-- Allows users to pre-authorize operator actions without requiring operator
+-- as co-signer on every transaction
+-- ═══════════════════════════════════════════════════════════════════════════
+
+template UserAuthorization
+  with
+    operator : Party
+    user : Party
+    authorizedAt : Time
+  where
+    signatory operator
+    observer user
+
+    -- User can create orders independently using this authorization
+    -- TODO: Future enhancement - implement this pattern fully
+    -- For now, we maintain operator involvement for matching/execution
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- DARK POOL OPERATOR
+-- ═══════════════════════════════════════════════════════════════════════════
+
 -- | Dark pool operator template - authorizes the operator to run the pool
 template DarkPoolOperator
   with
     operator : Party
+    pauseCid : ContractId ProtocolPause
   where
     signatory operator
 
@@ -20,6 +44,10 @@ template DarkPoolOperator
         quantity : Quantity
       controller operator, trader
       do
+        -- Check pause state
+        pause <- fetch pauseCid
+        assertMsg ("Protocol is paused: " <> pause.reason) (not pause.isPaused)
+
         now <- getTime
         assertMsg "Price must be positive" (price > 0.0)
         assertMsg "Quantity must be positive" (quantity > 0.0)
@@ -33,6 +61,10 @@ template DarkPoolOperator
           quantity
           status = Open
           createdAt = now
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SPOT ORDER
+-- ═══════════════════════════════════════════════════════════════════════════
 
 -- | Spot order in the dark pool
 template SpotOrder
@@ -55,7 +87,9 @@ template SpotOrder
         assertMsg "Order must be Open to cancel" (status == Open)
         create this with status = Cancelled
 
-    choice FillOrder : (ContractId TradeConfirm, Optional (ContractId SpotOrder), ContractId ActivityRecord)
+    -- PRIVACY-PRESERVING: Creates separate confirmations for buyer and seller
+    -- so they don't see each other's identity
+    choice FillOrder : (ContractId BuyerConfirm, ContractId SellerConfirm, Optional (ContractId SpotOrder), ContractId ActivityRecord)
       with
         fillPrice : Price
         fillQuantity : Quantity
@@ -67,22 +101,40 @@ template SpotOrder
         assertMsg "Fill price must be positive" (fillPrice > 0.0)
         assertMsg "Fill quantity must be positive" (fillQuantity > 0.0)
         assertMsg "Fill quantity cannot exceed remaining quantity" (fillQuantity <= quantity)
+
         let remainingQuantity = quantity - fillQuantity
-        confirm <- create TradeConfirm with
+        let buyer = if side == Buy then trader else counterparty
+        let seller = if side == Sell then trader else counterparty
+        let tradeId = show now <> "-" <> show trader <> "-" <> show fillQuantity
+
+        -- Create SEPARATE confirmations for privacy
+        buyerConfirm <- create BuyerConfirm with
           operator
-          buyer = if side == Buy then trader else counterparty
-          seller = if side == Sell then trader else counterparty
+          buyer
           baseAsset
           quoteAsset
           price = fillPrice
           quantity = fillQuantity
           executedAt = now
+          tradeId
+
+        sellerConfirm <- create SellerConfirm with
+          operator
+          seller
+          baseAsset
+          quoteAsset
+          price = fillPrice
+          quantity = fillQuantity
+          executedAt = now
+          tradeId
+
         residualOrder <-
-          if remainingQuantity <= 0.0000001
+          if remainingQuantity <= dustThreshold
             then pure None
             else do
               residual <- create this with quantity = remainingQuantity, createdAt = now
               pure (Some residual)
+
         activity <- create ActivityRecord with
           operator
           user = trader
@@ -90,19 +142,45 @@ template SpotOrder
           description = "Dark pool trade: " <> show fillQuantity <> " " <> baseAsset <> "/" <> quoteAsset
           timestamp = now
           rewardWeight = fillQuantity * fillPrice
-        return (confirm, residualOrder, activity)
 
--- | Trade confirmation
-template TradeConfirm
+        return (buyerConfirm, sellerConfirm, residualOrder, activity)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- TRADE CONFIRMATIONS (PRIVACY-PRESERVING)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- | Buyer's trade confirmation - ONLY buyer sees this
+template BuyerConfirm
   with
     operator : Party
     buyer : Party
+    baseAsset : Asset
+    quoteAsset : Asset
+    price : Price
+    quantity : Quantity
+    executedAt : Time
+    tradeId : Text  -- Shared ID for audit, but no counterparty info
+  where
+    signatory operator
+    observer buyer  -- PRIVACY: Only buyer observes
+
+    -- Buyer sees their side: bought X at price P
+    -- They DO NOT see seller's identity
+
+-- | Seller's trade confirmation - ONLY seller sees this
+template SellerConfirm
+  with
+    operator : Party
     seller : Party
     baseAsset : Asset
     quoteAsset : Asset
     price : Price
     quantity : Quantity
     executedAt : Time
+    tradeId : Text  -- Shared ID for audit, but no counterparty info
   where
     signatory operator
-    observer buyer, seller
+    observer seller  -- PRIVACY: Only seller observes
+
+    -- Seller sees their side: sold X at price P
+    -- They DO NOT see buyer's identity

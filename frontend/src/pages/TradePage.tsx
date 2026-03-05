@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useUserStore } from '../stores/userStore';
 import { getMyTrades, getMyOrders } from '../services/umbraApi';
 import OrderEntry from '../components/OrderEntry';
@@ -16,6 +16,7 @@ const TradePage: React.FC = () => {
   const [trades, setTrades] = useState<any[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  const lastWarnRef = useRef<{ msg: string; ts: number }>({ msg: '', ts: 0 });
 
   const refresh = useCallback(() => setTick(t => t + 1), []);
 
@@ -49,7 +50,13 @@ const TradePage: React.FC = () => {
 
   useEffect(() => {
     if (loadError) {
-      toast.displayWarning(`Trade page: ${loadError}`);
+      const now = Date.now();
+      const shouldWarn =
+        loadError !== lastWarnRef.current.msg || now - lastWarnRef.current.ts > 15_000;
+      if (shouldWarn) {
+        lastWarnRef.current = { msg: loadError, ts: now };
+        toast.displayWarning(`Trade page: ${loadError}`);
+      }
     }
   }, [loadError, toast]);
 

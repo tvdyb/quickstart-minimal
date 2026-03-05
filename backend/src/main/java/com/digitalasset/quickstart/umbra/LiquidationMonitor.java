@@ -12,8 +12,21 @@ import java.util.*;
 import static com.digitalasset.quickstart.umbra.ProtoHelper.*;
 
 /**
- * Monitors all BorrowPositions and triggers liquidation when health factor < 1.0.
+ * LIQUIDATION BOT: Monitors all BorrowPositions and triggers liquidation when health factor < 1.0.
  * Runs every 30 seconds.
+ *
+ * DECENTRALIZATION UPDATE: The Liquidate choice is now PUBLIC - ANY party can call it,
+ * not just the operator. This creates a competitive liquidation market like Aave/Compound.
+ *
+ * This monitor is just ONE liquidation bot. In production, multiple independent bots
+ * (run by different parties) should compete to liquidate positions for profit.
+ *
+ * The health factor calculation is now ON-CHAIN in DAML, not off-chain in Java.
+ * This bot still calculates locally for optimization, but the DAML contract validates
+ * everything atomically with fresh oracle prices.
+ *
+ * DECENTRALIZATION STATUS: This is an optional bot. Anyone can liquidate directly
+ * by calling the BorrowPosition.Liquidate choice.
  */
 @Component
 public class LiquidationMonitor {

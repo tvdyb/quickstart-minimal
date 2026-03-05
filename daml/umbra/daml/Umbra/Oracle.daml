@@ -2,7 +2,11 @@ module Umbra.Oracle where
 
 import Umbra.Types (Asset, Price)
 
--- | Oracle price feed template
+-- ═══════════════════════════════════════════════════════════════════════════
+-- ORACLE PRICE FEED
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- | Oracle price feed template with safety bounds
 template OraclePrice
   with
     oracle : Party
@@ -10,6 +14,9 @@ template OraclePrice
     asset : Asset
     price : Price
     lastUpdated : Time
+    minPrice : Price          -- Minimum allowed price (prevents oracle manipulation)
+    maxPrice : Price          -- Maximum allowed price (prevents oracle manipulation)
+    maxChangePercent : Decimal  -- Max % change per update (e.g., 0.5 = 50%)
   where
     signatory oracle
     observer observers
@@ -21,4 +28,46 @@ template OraclePrice
       do
         now <- getTime
         assertMsg "Price must be positive" (newPrice > 0.0)
-        create this with price = newPrice, lastUpdated = now
+        assertMsg ("Price below minimum bound (" <> show minPrice <> ")")
+          (newPrice >= minPrice)
+        assertMsg ("Price above maximum bound (" <> show maxPrice <> ")")
+          (newPrice <= maxPrice)
+
+        -- Check for sudden price changes (prevents flash crash attacks)
+        let priceChange = abs (newPrice - price)
+        let changePercent = if price == 0.0 then 0.0 else priceChange / price
+        assertMsg ("Price change too large: " <> show changePercent <> " exceeds max " <> show maxChangePercent)
+          (changePercent <= maxChangePercent)
+
+        create this with
+          price = newPrice
+          lastUpdated = now
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- MULTI-ORACLE AGGREGATION (FUTURE ENHANCEMENT)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- | Individual oracle submission for aggregation
+-- TODO: Implement multi-oracle pattern for production
+template OracleSubmission
+  with
+    submitter : Party
+    asset : Asset
+    price : Price
+    submittedAt : Time
+  where
+    signatory submitter
+
+-- | Aggregated price from multiple oracles (median-based)
+-- TODO: Implement aggregation logic for production
+template AggregatedPrice
+  with
+    operator : Party
+    asset : Asset
+    price : Price  -- Median of submissions
+    submissionCount : Int
+    lastAggregated : Time
+  where
+    signatory operator
+
+    -- Future: Add choice to aggregate multiple OracleSubmissions

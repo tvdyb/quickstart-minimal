@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useUserStore } from '../stores/userStore';
 import { useToast } from '../stores/toastStore';
@@ -11,17 +11,19 @@ import MyPositions from '../components/MyPositions';
 const LendPage: React.FC = () => {
   const toast = useToast();
   const { user } = useUserStore();
-  const trader = user?.party || user?.name || '';
+  const trader = user?.party || '';
   const [pool, setPool] = useState<any>({});
   const [positions, setPositions] = useState<any[]>([]);
   const [ccPrice, setCcPrice] = useState(100);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  const lastWarnRef = useRef<{ msg: string; ts: number }>({ msg: '', ts: 0 });
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
   useEffect(() => {
     const load = async () => {
+      setLoadError(null);
       try {
         setPool(await getPool());
       } catch (e: any) {
@@ -37,7 +39,7 @@ const LendPage: React.FC = () => {
       }
       if (trader) {
         try {
-          const p = await getPositions(trader);
+          const p = await getPositions();
           const merged = [
             ...(Array.isArray(p?.supply) ? p.supply : []),
             ...(Array.isArray(p?.borrow) ? p.borrow : []),
@@ -56,7 +58,13 @@ const LendPage: React.FC = () => {
 
   useEffect(() => {
     if (loadError) {
-      toast.displayWarning(`Lending page: ${loadError}`);
+      const now = Date.now();
+      const shouldWarn =
+        loadError !== lastWarnRef.current.msg || now - lastWarnRef.current.ts > 15_000;
+      if (shouldWarn) {
+        lastWarnRef.current = { msg: loadError, ts: now };
+        toast.displayWarning(`Lending page: ${loadError}`);
+      }
     }
   }, [loadError, toast]);
 

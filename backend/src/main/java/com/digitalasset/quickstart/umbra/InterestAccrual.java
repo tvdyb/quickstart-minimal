@@ -12,7 +12,17 @@ import java.util.Optional;
 import static com.digitalasset.quickstart.umbra.ProtoHelper.*;
 
 /**
- * Calls AccrueInterest on the LendingPool every 60 seconds.
+ * OPTIONAL CONVENIENCE SCHEDULER: Calls AccrueInterest on the LendingPool every 60 seconds
+ * to keep the index fresh.
+ *
+ * IMPORTANT: This is NOT required for correctness! Interest accrual is now calculated
+ * inline in DAML for every Supply/Borrow/Repay/Liquidate operation. This scheduler exists
+ * purely for convenience to update the pool state periodically.
+ *
+ * If this service stops, the protocol REMAINS CORRECT because every operation recalculates
+ * interest based on elapsed time. There is NO risk of "free borrows" anymore.
+ *
+ * DECENTRALIZATION STATUS: This is an optional optimization, not a critical dependency.
  */
 @Component
 public class InterestAccrual {

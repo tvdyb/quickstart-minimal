@@ -237,6 +237,10 @@ test-daml: ## Run daml tests
 test-daml: build-daml
 	./gradlew :daml:testDaml
 
+.PHONY: smoke-dark-pool-privacy
+smoke-dark-pool-privacy: ## Verify unauthenticated dark-pool endpoints are protected
+	./scripts/smoke-dark-pool-privacy.sh http://localhost:${BACKEND_PORT}
+
 .PHONY: build-docker-images
 build-docker-images: docker-available
 	$(call docker-compose, ${DOCKER_COMPOSE_OBSERVABILITY_FILES} $(RESOURCE_CONSTRAINT_CONFIG) build)
