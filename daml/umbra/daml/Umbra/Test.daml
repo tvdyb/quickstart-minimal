@@ -45,7 +45,7 @@ testDarkPool = script do
       minPrice = 49000.0
       maxPrice = 51000.0
 
-  -- Operator accepts Alice's order request → creates co-signed SpotOrder
+  -- Operator accepts Alice's order request
   buyOrder <- submit operator do
     exerciseCmd aliceReq AcceptOrderRequest
 
@@ -138,11 +138,31 @@ testDarkPool = script do
       fillQuantity = 1.0
       counterparty = bob
 
-  -- ─── Trader cancellation test ───
+  -- ─── Cancel tests ───
 
-  -- Trader can cancel their own order via TraderCancelOrder
-  submitMulti [alice] [operator] do
-    exerciseCmd priceTestOrder TraderCancelOrder
+  -- Operator cancels via submitter pattern
+  submit operator do
+    exerciseCmd priceTestOrder CancelOrder with submitter = operator
+
+  -- Create another order for trader cancellation test
+  cancelReq <- submit alice do
+    createCmd OrderRequest with
+      trader = alice
+      operator
+      baseAsset = "SOL"
+      quoteAsset = "USDC"
+      side = Buy
+      price = 100.0
+      quantity = 10.0
+      minPrice = 90.0
+      maxPrice = 110.0
+
+  cancelOrder <- submit operator do
+    exerciseCmd cancelReq AcceptOrderRequest
+
+  -- Trader cancels their own order
+  submit alice do
+    exerciseCmd cancelOrder CancelOrder with submitter = alice
 
   -- ─── Withdraw order request test ───
 
@@ -164,7 +184,7 @@ testDarkPool = script do
 
   return ()
 
--- | Test lending pool operations with decentralized authorization
+-- | Test lending pool operations with flexible submitter pattern
 testLending : Script ()
 testLending = script do
   operator <- allocateParty "Operator"
@@ -228,29 +248,25 @@ testLending = script do
       borrowIndex = 1.0
       pauseCid
 
-  -- ─── USER-INITIATED: Alice supplies 10000 USDC ───
-  -- Alice exercises Supply directly (readAs operator to see pool)
-  (pool2, supplyPos, _) <- submitMulti [alice] [operator] do
+  -- ─── OPERATOR-PROXIED: Alice supplies 10000 USDC ───
+  -- Backend submits as operator on behalf of Alice
+  (pool2, supplyPos, _) <- submit operator do
     exerciseCmd pool Supply with
       supplier = alice
       amount = 10000.0
+      submitter = operator
 
-  -- Verify operator alone cannot supply on behalf of user
-  submitMustFail operator do
-    exerciseCmd pool2 Supply with
-      supplier = alice
-      amount = 100.0
-
-  -- ─── USER-INITIATED: Bob borrows 1000 USDC with 200 CC collateral ───
-  (pool3, borrowPos, _) <- submitMulti [bob] [operator] do
+  -- ─── OPERATOR-PROXIED: Bob borrows 1000 USDC with 200 CC collateral ───
+  (pool3, borrowPos, _) <- submit operator do
     exerciseCmd pool2 Borrow with
       borrower = bob
       borrowAmount = 1000.0
       collateralAmount = 200.0
       oracleCid = usdcOracle
       collateralOracleCid = ccOracle
+      submitter = operator
 
-  -- Check health factor
+  -- Check health factor (borrower can always check their own position)
   hf <- submit bob do
     exerciseCmd borrowPos GetHealthFactor with
       borrowOracleCid = usdcOracle
@@ -266,36 +282,39 @@ testLending = script do
   pool4 <- submit operator do
     exerciseCmd pool3 AccrueInterest
 
-  -- ─── USER-INITIATED: Bob partially repays ───
-  (pool5, residualOpt, _) <- submitMulti [bob] [operator] do
+  -- ─── OPERATOR-PROXIED: Bob partially repays ───
+  (pool5, residualOpt, _) <- submit operator do
     exerciseCmd pool4 RepayBorrow with
       borrower = bob
       positionCid = borrowPos
       repayAmount = 250.0
+      submitter = operator
 
   residualBorrow <- case residualOpt of
     Some cid -> pure cid
     None -> abort "Expected residual borrow position after partial repay"
 
-  -- ─── USER-INITIATED: Bob fully closes remaining debt ───
-  (pool6, residualOpt2, _) <- submitMulti [bob] [operator] do
+  -- ─── OPERATOR-PROXIED: Bob fully closes remaining debt ───
+  (pool6, residualOpt2, _) <- submit operator do
     exerciseCmd pool5 RepayBorrow with
       borrower = bob
       positionCid = residualBorrow
       repayAmount = 2000.0
+      submitter = operator
 
   case residualOpt2 of
     Some _ -> abort "Expected no residual borrow position after full repay"
     None -> pure ()
 
-  -- Old oracle contracts are now stale (next day with 1h max age), borrowing should fail.
-  submitMustFail bob do
+  -- ─── Stale oracle test ───
+  submitMustFail operator do
     exerciseCmd pool6 Borrow with
       borrower = bob
       borrowAmount = 100.0
       collateralAmount = 30.0
       oracleCid = usdcOracle
       collateralOracleCid = ccOracle
+      submitter = operator
 
   -- Refresh oracle data.
   usdcOracleFresh <- submit oracle do
@@ -305,23 +324,25 @@ testLending = script do
     exerciseCmd ccOracle UpdatePrice with
       newPrice = 10.0
 
-  -- Borrow cap enforcement.
-  submitMustFail bob do
+  -- ─── Borrow cap test ───
+  submitMustFail operator do
     exerciseCmd pool6 Borrow with
       borrower = bob
       borrowAmount = 1300.0
       collateralAmount = 300.0
       oracleCid = usdcOracleFresh
       collateralOracleCid = ccOracleFresh
+      submitter = operator
 
   -- ─── Open a new borrow to test liquidation ───
-  (pool7, riskyBorrow, _) <- submitMulti [bob] [operator] do
+  (pool7, riskyBorrow, _) <- submit operator do
     exerciseCmd pool6 Borrow with
       borrower = bob
       borrowAmount = 500.0
       collateralAmount = 120.0
       oracleCid = usdcOracleFresh
       collateralOracleCid = ccOracleFresh
+      submitter = operator
 
   -- Drop collateral price so the position becomes liquidatable.
   ccOracleDown <- submit oracle do
@@ -338,11 +359,98 @@ testLending = script do
 
   pure ()
 
-  -- ─── USER-INITIATED: Alice withdraws her supply ───
-  (_pool9, _, _) <- submitMulti [alice] [operator] do
+  -- ─── OPERATOR-PROXIED: Alice withdraws her supply ───
+  (_pool9, _, _) <- submit operator do
     exerciseCmd _pool8 WithdrawSupply with
       supplier = alice
       positionCid = supplyPos
+      submitter = operator
+
+  return ()
+
+-- | Test that unauthorized submitters are rejected
+testSubmitterAuth : Script ()
+testSubmitterAuth = script do
+  operator <- allocateParty "Operator"
+  alice <- allocateParty "Alice"
+  bob <- allocateParty "Bob"
+  oracle <- allocateParty "Oracle"
+
+  let startTime = time (date 2026 Jan 15) 12 0 0
+  setTime startTime
+
+  pauseCid <- submit operator do
+    createCmd ProtocolPause with
+      operator
+      isPaused = False
+      reason = ""
+      pausedAt = None
+
+  _usdcOracle <- submit oracle do
+    createCmd OraclePrice with
+      oracle
+      observers = [operator, alice, bob]
+      asset = "USDC"
+      price = 1.0
+      lastUpdated = startTime
+      minPrice = 0.90
+      maxPrice = 1.10
+      maxChangePercent = 0.1
+
+  _ccOracle <- submit oracle do
+    createCmd OraclePrice with
+      oracle
+      observers = [operator, alice, bob]
+      asset = "CC"
+      price = 10.0
+      lastUpdated = startTime
+      minPrice = 0.01
+      maxPrice = 100.0
+      maxChangePercent = 0.5
+
+  let rateModel = RateModelParams with
+        baseRate = 0.02
+        multiplier = 0.1
+        jumpMultiplier = 3.0
+        kink = 0.80
+
+  pool <- submit operator do
+    createCmd LendingPool with
+      operator
+      asset = "USDC"
+      totalSupply = 0.0
+      totalBorrows = 0.0
+      reserves = 0.0
+      reserveFactor = 0.10
+      borrowCap = Some 100000.0
+      rateModel
+      collateralConfig = defaultCCCollateral
+      lastUpdateTime = startTime
+      accumulatedIndex = 1.0
+      borrowIndex = 1.0
+      pauseCid
+
+  -- Bob cannot supply on behalf of Alice (submitter must be supplier or operator)
+  submitMustFail bob do
+    exerciseCmd pool Supply with
+      supplier = alice
+      amount = 100.0
+      submitter = bob
+
+  -- Alice CAN supply directly as herself (submitter = supplier)
+  -- Needs readAs operator to see the pool contract (production: participant config)
+  (pool2, _, _) <- submitMulti [alice] [operator] do
+    exerciseCmd pool Supply with
+      supplier = alice
+      amount = 100.0
+      submitter = alice
+
+  -- Operator CAN supply on behalf of Alice (submitter = operator)
+  (_pool3, _, _) <- submit operator do
+    exerciseCmd pool2 Supply with
+      supplier = alice
+      amount = 100.0
+      submitter = operator
 
   return ()
 

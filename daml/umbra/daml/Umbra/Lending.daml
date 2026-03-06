@@ -11,8 +11,6 @@ import DA.Time (subTime, convertRelTimeToMicroseconds)
 
 -- | Calculate accrued interest given pool state and current time.
 -- Returns (newTotalSupply, newBorrows, newReserves, newSupplyIndex, newBorrowIndex).
--- Supply index grows at supply rate (= borrowRate * utilization * (1 - reserveFactor)).
--- Borrow index grows at borrow rate (used for debt calculations).
 accrueInterestInternal : LendingPool -> Time -> (Decimal, Decimal, Decimal, Decimal, Decimal)
 accrueInterestInternal pool now =
   let elapsed = subTime now pool.lastUpdateTime
@@ -53,8 +51,8 @@ validatePoolInvariants pool = do
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- LENDING POOL - CORE STATE TEMPLATE
--- User-initiated choices: Supply, Borrow, RepayBorrow, WithdrawSupply
--- Operator-only choices: AccrueInterest, LiquidateBorrow
+-- Flexible `submitter` pattern: user OR operator can initiate actions.
+-- Backend uses operator as submitter; direct user access uses user as submitter.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 template LendingPool
@@ -100,7 +98,7 @@ template LendingPool
             return (normalRate + excessUtil * rateModel.jumpMultiplier)
 
     -- ───────────────────────────────────────────────────────────────────────
-    -- ADMIN: Manual interest accrual
+    -- ADMIN: Manual interest accrual (operator-only)
     -- ───────────────────────────────────────────────────────────────────────
     choice AccrueInterest : ContractId LendingPool
       controller operator
@@ -117,15 +115,18 @@ template LendingPool
           lastUpdateTime = now
 
     -- ───────────────────────────────────────────────────────────────────────
-    -- SUPPLY: User deposits assets (USER-INITIATED)
-    -- Supplier exercises directly; operator auth flows from pool signatory.
+    -- SUPPLY: User deposits assets
+    -- submitter = supplier (direct) or operator (backend proxy)
     -- ───────────────────────────────────────────────────────────────────────
     choice Supply : (ContractId LendingPool, ContractId SupplyPosition, ContractId ActivityRecord)
       with
         supplier : Party
         amount : Decimal
-      controller supplier
+        submitter : Party
+      controller submitter
       do
+        assertMsg "Submitter must be supplier or operator" (submitter == supplier || submitter == operator)
+
         pause <- fetch pauseCid
         assertMsg ("Protocol is paused: " <> pause.reason) (not pause.isPaused)
 
@@ -162,8 +163,8 @@ template LendingPool
         return (newPool, position, activity)
 
     -- ───────────────────────────────────────────────────────────────────────
-    -- BORROW: User borrows with collateral (USER-INITIATED)
-    -- Borrower exercises directly; operator auth flows from pool signatory.
+    -- BORROW: User borrows with collateral
+    -- submitter = borrower (direct) or operator (backend proxy)
     -- ───────────────────────────────────────────────────────────────────────
     choice Borrow : (ContractId LendingPool, ContractId BorrowPosition, ContractId ActivityRecord)
       with
@@ -172,8 +173,11 @@ template LendingPool
         collateralAmount : Decimal
         oracleCid : ContractId OraclePrice
         collateralOracleCid : ContractId OraclePrice
-      controller borrower
+        submitter : Party
+      controller submitter
       do
+        assertMsg "Submitter must be borrower or operator" (submitter == borrower || submitter == operator)
+
         pause <- fetch pauseCid
         assertMsg ("Protocol is paused: " <> pause.reason) (not pause.isPaused)
 
@@ -237,17 +241,18 @@ template LendingPool
         return (newPool, position, activity)
 
     -- ───────────────────────────────────────────────────────────────────────
-    -- REPAY: Borrower repays debt (USER-INITIATED)
-    -- Borrower exercises directly; both operator (pool signatory) and borrower
-    -- (controller) auth available, so archiving BorrowPosition works.
+    -- REPAY: Borrower repays debt
+    -- submitter = borrower (direct) or operator (backend proxy)
     -- ───────────────────────────────────────────────────────────────────────
     choice RepayBorrow : (ContractId LendingPool, Optional (ContractId BorrowPosition), ContractId ActivityRecord)
       with
         borrower : Party
         positionCid : ContractId BorrowPosition
         repayAmount : Decimal
-      controller borrower
+        submitter : Party
+      controller submitter
       do
+        assertMsg "Submitter must be borrower or operator" (submitter == borrower || submitter == operator)
         assertMsg "Repay amount must be positive" (repayAmount > 0.0)
 
         pause <- fetch pauseCid
@@ -298,8 +303,7 @@ template LendingPool
 
     -- ───────────────────────────────────────────────────────────────────────
     -- LIQUIDATE: Anyone can liquidate undercollateralized positions
-    -- Operator-controlled: exercises LiquidatePosition on BorrowPosition
-    -- to handle the archive+residual within the position's signatory scope.
+    -- Operator-only: liquidation is time-sensitive and must bypass user consent
     -- ───────────────────────────────────────────────────────────────────────
     choice LiquidateBorrow : (ContractId LendingPool, Optional (ContractId BorrowPosition), ContractId ActivityRecord)
       with
@@ -364,14 +368,26 @@ template LendingPool
         let collateralAfter = max 0.0 (position.collateralAmount - collateralSeized)
         let newTotalBorrows = max 0.0 (totalBorrows - debtRepaid)
 
-        -- Exercise LiquidatePosition on BorrowPosition to handle archive+residual
-        -- This works because operator is signatory+controller of BorrowPosition
-        residualPosition <- exercise positionCid LiquidatePosition with
-          newBorrowAmount = debtAfter
-          newCollateralAmount = collateralAfter
-          currentBorrowIndex = currentBorrowIdx
+        archive positionCid
 
         newPool <- create this with totalBorrows = newTotalBorrows
+
+        residualPosition <-
+          if debtAfter <= dustThreshold || collateralAfter <= dustThreshold
+            then pure None
+            else do
+              residual <- create BorrowPosition with
+                operator = position.operator
+                borrower = position.borrower
+                borrowAsset = position.borrowAsset
+                borrowAmount = debtAfter
+                collateralAsset = position.collateralAsset
+                collateralAmount = collateralAfter
+                entryIndex = currentBorrowIdx
+                liquidationThreshold = position.liquidationThreshold
+                createdAt = position.createdAt
+                updatedAt = now
+              pure (Some residual)
 
         activity <- create ActivityRecord with
           operator
@@ -389,14 +405,17 @@ template LendingPool
 
     -- ───────────────────────────────────────────────────────────────────────
     -- WITHDRAW: Supplier withdraws deposited assets with accrued interest
-    -- (USER-INITIATED) Supplier exercises directly.
+    -- submitter = supplier (direct) or operator (backend proxy)
     -- ───────────────────────────────────────────────────────────────────────
     choice WithdrawSupply : (ContractId LendingPool, Decimal, ContractId ActivityRecord)
       with
         supplier : Party
         positionCid : ContractId SupplyPosition
-      controller supplier
+        submitter : Party
+      controller submitter
       do
+        assertMsg "Submitter must be supplier or operator" (submitter == supplier || submitter == operator)
+
         pause <- fetch pauseCid
         assertMsg ("Protocol is paused: " <> pause.reason) (not pause.isPaused)
 
@@ -436,7 +455,7 @@ template LendingPool
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- SUPPLY POSITION
--- signatory operator, supplier — protects user funds from unilateral operator action
+-- signatory operator so the pool can archive it during withdrawal
 -- ═══════════════════════════════════════════════════════════════════════════
 
 template SupplyPosition
@@ -448,12 +467,12 @@ template SupplyPosition
     entryIndex : Decimal
     createdAt : Time
   where
-    signatory operator, supplier
+    signatory operator
+    observer supplier
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- BORROW POSITION
--- signatory operator, borrower — protects borrower from unauthorized changes
--- LiquidatePosition choice allows operator to liquidate without borrower consent
+-- signatory operator so the pool can archive it during repay/liquidation
 -- ═══════════════════════════════════════════════════════════════════════════
 
 template BorrowPosition
@@ -469,7 +488,8 @@ template BorrowPosition
     createdAt : Time
     updatedAt : Time
   where
-    signatory operator, borrower
+    signatory operator
+    observer borrower
 
     nonconsuming choice GetHealthFactor : Decimal
       with
@@ -488,24 +508,3 @@ template BorrowPosition
         if debtValue == 0.0
           then return 999.0
           else return (liquidationValue / debtValue)
-
-    -- Operator-controlled consuming choice for liquidation.
-    -- Within this choice body, both operator and borrower auth are available
-    -- (from contract signatories), enabling residual position creation.
-    choice LiquidatePosition : Optional (ContractId BorrowPosition)
-      with
-        newBorrowAmount : Decimal
-        newCollateralAmount : Decimal
-        currentBorrowIndex : Decimal
-      controller operator
-      do
-        now <- getTime
-        if newBorrowAmount <= dustThreshold || newCollateralAmount <= dustThreshold
-          then pure None
-          else do
-            residual <- create this with
-              borrowAmount = newBorrowAmount
-              collateralAmount = newCollateralAmount
-              entryIndex = currentBorrowIndex
-              updatedAt = now
-            pure (Some residual)

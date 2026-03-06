@@ -33,7 +33,6 @@ template OrderRequest
         assertMsg "Min price must be non-negative" (minPrice >= 0.0)
         assertMsg "Max price must be positive" (maxPrice > 0.0)
         assertMsg "Min price must not exceed max price" (minPrice <= maxPrice)
-        -- Auth: operator from controller, trader from contract signatory
         create SpotOrder with
           operator
           trader
@@ -64,8 +63,7 @@ template DarkPoolOperator
   where
     signatory operator
 
-    -- Operator can still create orders directly (for backwards compatibility
-    -- and operator-facilitated order entry). Creates operator-only signed orders.
+    -- Operator creates orders on behalf of traders (backend flow)
     nonconsuming choice CreateOrder : ContractId SpotOrder
       with
         trader : Party
@@ -91,15 +89,13 @@ template DarkPoolOperator
           side
           price
           quantity
-          minPrice = 0.0      -- No price protection for operator-created orders
+          minPrice = 0.0       -- No price protection for operator-created orders
           maxPrice = 999999.0  -- No price protection for operator-created orders
           status = Open
           createdAt = now
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- SPOT ORDER
--- signatory operator, trader when created via OrderRequest (co-signed)
--- signatory operator only when created via DarkPoolOperator.CreateOrder
 -- ═══════════════════════════════════════════════════════════════════════════
 
 -- | Spot order in the dark pool with price protection bounds
@@ -120,17 +116,13 @@ template SpotOrder
     signatory operator
     observer trader
 
-    -- Trader can cancel their own orders
+    -- Flexible cancel: either operator or trader can cancel
     choice CancelOrder : ContractId SpotOrder
-      controller operator
+      with
+        submitter : Party
+      controller submitter
       do
-        assertMsg "Order must be Open to cancel" (status == Open)
-        create this with status = Cancelled
-
-    -- Trader-initiated cancellation
-    choice TraderCancelOrder : ContractId SpotOrder
-      controller trader
-      do
+        assertMsg "Only trader or operator can cancel" (submitter == trader || submitter == operator)
         assertMsg "Order must be Open to cancel" (status == Open)
         create this with status = Cancelled
 
@@ -218,9 +210,6 @@ template BuyerConfirm
     signatory operator
     observer buyer  -- PRIVACY: Only buyer observes
 
-    -- Buyer sees their side: bought X at price P
-    -- They DO NOT see seller's identity
-
 -- | Seller's trade confirmation - ONLY seller sees this
 template SellerConfirm
   with
@@ -235,6 +224,3 @@ template SellerConfirm
   where
     signatory operator
     observer seller  -- PRIVACY: Only seller observes
-
-    -- Seller sees their side: sold X at price P
-    -- They DO NOT see buyer's identity

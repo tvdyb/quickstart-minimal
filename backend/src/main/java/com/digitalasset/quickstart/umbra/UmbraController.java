@@ -298,12 +298,9 @@ public class UmbraController {
     public CompletableFuture<ResponseEntity<Map<String, Object>>> cancelOrder(
             @PathVariable String contractId
     ) {
-        ResponseEntity<Map<String, Object>> guard = requireOperatorSession("Cancel order");
-        if (guard != null) {
-            return CompletableFuture.completedFuture(guard);
-        }
-
-        ValueOuterClass.Value choiceArg = unitVal();
+        ValueOuterClass.Value choiceArg = recordVal(
+                field("submitter", partyVal(config.getOperatorParty()))
+        );
 
         return ledger.exerciseChoice(
                 contractId,
@@ -429,7 +426,8 @@ public class UmbraController {
                     String poolCid = (String) pool.get("contractId");
                     ValueOuterClass.Value choiceArg = recordVal(
                             field("supplier", partyVal(supplier)),
-                            field("amount", numericVal(amount))
+                            field("amount", numericVal(amount)),
+                            field("submitter", partyVal(config.getOperatorParty()))
                     );
                     return ledger.exerciseChoice(
                             poolCid,
@@ -507,7 +505,8 @@ public class UmbraController {
                             field("borrowAmount", numericVal(borrowAmount)),
                             field("collateralAmount", numericVal(collateralAmount)),
                             field("oracleCid", contractIdVal(borrowOracleCid)),
-                            field("collateralOracleCid", contractIdVal(collateralPriceOracleCid))
+                            field("collateralOracleCid", contractIdVal(collateralPriceOracleCid)),
+                            field("submitter", partyVal(config.getOperatorParty()))
                     );
                     return ledger.exerciseChoice(
                             poolCid,
@@ -564,7 +563,8 @@ public class UmbraController {
                     ValueOuterClass.Value choiceArg = recordVal(
                             field("borrower", partyVal(borrower)),
                             field("positionCid", contractIdVal(contractId)),
-                            field("repayAmount", numericVal(repayAmount))
+                            field("repayAmount", numericVal(repayAmount)),
+                            field("submitter", partyVal(config.getOperatorParty()))
                     );
                     return ledger.exerciseChoice(
                             poolContractId,
@@ -647,6 +647,51 @@ public class UmbraController {
                     ))).exceptionally(e -> {
                         logger.error("Liquidation failed", e);
                         return mapLedgerWriteFailure("Liquidate", e);
+                    });
+                })
+                .orElse(CompletableFuture.completedFuture(
+                        ResponseEntity.badRequest().body(Map.<String, Object>of("error", "LendingPool not found"))
+                ));
+    }
+
+    /**
+     * POST /api/pool/withdraw → Withdraw a supply position
+     * Body: { contractId (or positionId) }
+     */
+    @PostMapping("/pool/withdraw")
+    public CompletableFuture<ResponseEntity<Map<String, Object>>> withdraw(@RequestBody Map<String, Object> body) {
+        String supplier = authenticatedPartyProvider.getPartyOrFail();
+
+        String contractId = body.get("contractId") == null
+                ? String.valueOf(body.getOrDefault("positionId", ""))
+                : String.valueOf(body.get("contractId"));
+
+        if (contractId == null || contractId.isBlank()) {
+            return CompletableFuture.completedFuture(
+                    ResponseEntity.badRequest().body(Map.<String, Object>of("error", "Position contract id is required"))
+            );
+        }
+
+        return repo.getLendingPool()
+                .map(pool -> {
+                    String poolCid = (String) pool.get("contractId");
+                    ValueOuterClass.Value choiceArg = recordVal(
+                            field("supplier", partyVal(supplier)),
+                            field("positionCid", contractIdVal(contractId)),
+                            field("submitter", partyVal(config.getOperatorParty()))
+                    );
+                    return ledger.exerciseChoice(
+                            poolCid,
+                            "Umbra.Lending", "LendingPool",
+                            "WithdrawSupply",
+                            choiceArg,
+                            config.getOperatorParty()
+                    ).thenApply(tx -> ResponseEntity.ok(Map.<String, Object>of(
+                            "status", "withdrawn",
+                            "transactionId", tx.getUpdateId()
+                    ))).exceptionally(e -> {
+                        logger.error("Withdraw failed", e);
+                        return mapLedgerWriteFailure("Withdraw", e);
                     });
                 })
                 .orElse(CompletableFuture.completedFuture(
