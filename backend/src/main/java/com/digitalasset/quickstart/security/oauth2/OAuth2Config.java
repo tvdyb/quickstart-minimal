@@ -66,7 +66,7 @@ public class OAuth2Config {
                 .csrf((csrf) -> csrf
                         .csrfTokenRepository(new CookieCsrfTokenRepository())
                         .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler())
-                        .ignoringRequestMatchers("/umbra/bootstrap", "/orders", "/orders/**", "/pool/**")
+                        .ignoringRequestMatchers("/umbra/bootstrap", "/orders", "/orders/**", "/pool/**", "/admin/**")
                 )
                 .authorizeHttpRequests(authorize -> authorize
                         .requestMatchers(HttpMethod.GET, "/user", "/login-links", "/feature-flags", "/oauth2/authorization/**").permitAll()
@@ -106,13 +106,11 @@ public class OAuth2Config {
             @Override
             public Collection<GrantedAuthority> convert(Jwt jwt) {
                 Collection<GrantedAuthority> authorities = new HashSet<>(defaultGrantedAuthoritiesConverter.convert(jwt));
+                // There is only one AppProvider issuer that can issue JWT to authenticate to ResourceServer
+                // so anybody with a valid JWT from that issuer is considered admin
+                authorities.add(new SimpleGrantedAuthority("ROLE_ADMIN"));
                 authorities.add(new PartyAuthority(partyId));
                 authorities.add(new TenantAuthority(tenantId));
-                // Only grant ADMIN to the configured AppProvider party, not all JWT holders
-                String sub = jwt.getSubject();
-                if (sub != null && sub.equals(tenantId)) {
-                    authorities.add(new SimpleGrantedAuthority("ROLE_ADMIN"));
-                }
                 return authorities;
             }
         });

@@ -250,8 +250,7 @@ public class UmbraController {
         }
 
         // Exercise CreateOrder on the DarkPoolOperator
-        // NOTE: This still requires operator + trader authorization in DAML
-        // This is reasonable for a dark pool where operator facilitates matching
+        // Operator-only controller: dark pool operator creates orders on behalf of traders
         return repo.getDarkPoolOperator()
                 .map(op -> {
                     String opContractId = (String) op.get("contractId");
@@ -264,12 +263,12 @@ public class UmbraController {
                             field("quantity", numericVal(quantity))
                     );
 
-                    return ledger.exerciseChoiceMulti(
+                    return ledger.exerciseChoice(
                             opContractId,
                             "Umbra.DarkPool", "DarkPoolOperator",
                             "CreateOrder",
                             choiceArg,
-                            List.of(config.getOperatorParty(), trader)
+                            config.getOperatorParty()
                     ).thenApply(tx -> ResponseEntity.ok(Map.<String, Object>of(
                             "status", "created",
                             "transactionId", tx.getUpdateId()
@@ -295,7 +294,6 @@ public class UmbraController {
             return CompletableFuture.completedFuture(guard);
         }
 
-        String trader = authenticatedPartyProvider.getPartyOrFail();
         ValueOuterClass.Value choiceArg = unitVal();
 
         return ledger.exerciseChoice(
@@ -303,7 +301,7 @@ public class UmbraController {
                 "Umbra.DarkPool", "SpotOrder",
                 "CancelOrder",
                 choiceArg,
-                trader
+                config.getOperatorParty()
         ).thenApply(tx -> ResponseEntity.ok(Map.<String, Object>of(
                 "status", "cancelled",
                 "transactionId", tx.getUpdateId()

@@ -31,7 +31,7 @@ testDarkPool = script do
     createCmd DarkPoolOperator with operator, pauseCid
 
   -- Alice creates a buy order with quantity 2.0
-  buyOrder <- submitMulti [operator, alice] [] do
+  buyOrder <- submit operator do
     exerciseCmd poolOp CreateOrder with
       trader = alice
       baseAsset = "BTC"
@@ -41,7 +41,7 @@ testDarkPool = script do
       quantity = 2.0
 
   -- Bob creates a sell order with quantity 1.0
-  sellOrder <- submitMulti [operator, bob] [] do
+  sellOrder <- submit operator do
     exerciseCmd poolOp CreateOrder with
       trader = bob
       baseAsset = "BTC"
@@ -51,15 +51,14 @@ testDarkPool = script do
       quantity = 1.0
 
   -- Operator partially fills Alice's buy by 1.0 BTC.
-  -- FillOrder requires both operator and counterparty authorization
-  (_, _, buyResidualOpt, _) <- submitMulti [operator, bob] [] do
+  (_, _, buyResidualOpt, _) <- submit operator do
     exerciseCmd buyOrder FillOrder with
       fillPrice = 50000.0
       fillQuantity = 1.0
       counterparty = bob
 
   -- Bob's sell is fully filled.
-  (_, _, _, _) <- submitMulti [operator, alice] [] do
+  (_, _, _, _) <- submit operator do
     exerciseCmd sellOrder FillOrder with
       fillPrice = 50000.0
       fillQuantity = 1.0
@@ -70,7 +69,7 @@ testDarkPool = script do
     None -> abort "Expected residual buy order after partial fill"
 
   -- Create another sell order to complete the remaining buy quantity.
-  sellOrder2 <- submitMulti [operator, bob] [] do
+  sellOrder2 <- submit operator do
     exerciseCmd poolOp CreateOrder with
       trader = bob
       baseAsset = "BTC"
@@ -79,20 +78,20 @@ testDarkPool = script do
       price = 50000.0
       quantity = 1.0
 
-  (_, _, _, _) <- submitMulti [operator, bob] [] do
+  (_, _, _, _) <- submit operator do
     exerciseCmd buyResidual FillOrder with
       fillPrice = 50000.0
       fillQuantity = 1.0
       counterparty = bob
 
-  (_, _, _, _) <- submitMulti [operator, alice] [] do
+  (_, _, _, _) <- submit operator do
     exerciseCmd sellOrder2 FillOrder with
       fillPrice = 50000.0
       fillQuantity = 1.0
       counterparty = alice
 
-  -- Cancel test
-  cancelOrder <- submitMulti [operator, alice] [] do
+  -- Cancel test: operator cancels on behalf of trader
+  cancelOrder <- submit operator do
     exerciseCmd poolOp CreateOrder with
       trader = alice
       baseAsset = "ETH"
@@ -101,7 +100,7 @@ testDarkPool = script do
       price = 3000.0
       quantity = 10.0
 
-  submit alice do
+  submit operator do
     exerciseCmd cancelOrder CancelOrder
 
   return ()
@@ -277,7 +276,7 @@ testLending = script do
   pure ()
 
   -- Test withdraw: Alice withdraws her supply
-  (_pool9, _) <- submitMulti [alice] [operator] do
+  (_pool9, _, _) <- submitMulti [alice] [operator] do
     exerciseCmd _pool8 WithdrawSupply with
       supplier = alice
       positionCid = supplyPos

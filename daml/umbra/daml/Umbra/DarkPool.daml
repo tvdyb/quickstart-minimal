@@ -42,7 +42,7 @@ template DarkPoolOperator
         side : Side
         price : Price
         quantity : Quantity
-      controller operator, trader
+      controller operator
       do
         -- Check pause state
         pause <- fetch pauseCid
@@ -79,10 +79,11 @@ template SpotOrder
     status : OrderStatus
     createdAt : Time
   where
-    signatory operator, trader
+    signatory operator
+    observer trader
 
     choice CancelOrder : ContractId SpotOrder
-      controller trader
+      controller operator
       do
         assertMsg "Order must be Open to cancel" (status == Open)
         create this with status = Cancelled
@@ -94,7 +95,7 @@ template SpotOrder
         fillPrice : Price
         fillQuantity : Quantity
         counterparty : Party
-      controller operator, counterparty
+      controller operator
       do
         now <- getTime
         assertMsg "Order must be Open to fill" (status == Open)

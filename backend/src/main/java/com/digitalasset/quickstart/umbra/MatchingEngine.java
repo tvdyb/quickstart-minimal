@@ -102,32 +102,32 @@ public class MatchingEngine {
                 logger.info("Matching orders: buy={} sell={} at midPrice={} quantity={}", buyContractId, sellContractId, midPrice, matchQuantity);
 
                 try {
-                    // Fill the buy order (controller = operator + counterparty seller)
+                    // Fill the buy order (controller = operator)
                     ValueOuterClass.Value fillBuyArg = recordVal(
                             field("fillPrice", numericVal(midPrice)),
                             field("fillQuantity", numericVal(matchQuantity)),
                             field("counterparty", partyVal(seller))
                     );
-                    ledger.exerciseChoiceMulti(
+                    ledger.exerciseChoice(
                             buyContractId,
                             "Umbra.DarkPool", "SpotOrder",
                             "FillOrder",
                             fillBuyArg,
-                            List.of(operator, seller)
+                            operator
                     ).get(); // blocking - sequential matching is simpler
 
-                    // Fill the sell order (controller = operator + counterparty buyer)
+                    // Fill the sell order (controller = operator)
                     ValueOuterClass.Value fillSellArg = recordVal(
                             field("fillPrice", numericVal(midPrice)),
                             field("fillQuantity", numericVal(matchQuantity)),
                             field("counterparty", partyVal(buyer))
                     );
-                    ledger.exerciseChoiceMulti(
+                    ledger.exerciseChoice(
                             sellContractId,
                             "Umbra.DarkPool", "SpotOrder",
                             "FillOrder",
                             fillSellArg,
-                            List.of(operator, buyer)
+                            operator
                     ).get();
 
                     logger.info("Matched: {} buys from {} at {}", buyBase, seller, midPrice);

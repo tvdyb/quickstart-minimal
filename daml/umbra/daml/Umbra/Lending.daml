@@ -396,7 +396,7 @@ template LendingPool
     -- ───────────────────────────────────────────────────────────────────────
     -- WITHDRAW: Supplier withdraws deposited assets with accrued interest
     -- ───────────────────────────────────────────────────────────────────────
-    choice WithdrawSupply : (ContractId LendingPool, ContractId ActivityRecord)
+    choice WithdrawSupply : (ContractId LendingPool, Decimal, ContractId ActivityRecord)
       with
         supplier : Party
         positionCid : ContractId SupplyPosition
@@ -437,7 +437,7 @@ template LendingPool
           timestamp = now
           rewardWeight = withdrawAmount
 
-        return (newPool, activity)
+        return (newPool, withdrawAmount, activity)
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- SUPPLY POSITION

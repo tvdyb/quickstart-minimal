@@ -40,7 +40,7 @@ public class OraclePriceService {
     }
 
     @Scheduled(fixedRate = 300_000) // 5 minutes
-    public void updatePrice() {
+    public void updatePrices() {
         if (!mockMode) {
             logger.debug("Oracle mock mode disabled, skipping price update");
             return;
@@ -49,15 +49,23 @@ public class OraclePriceService {
         String oracleParty = config.getOracleParty();
         if (oracleParty.isEmpty()) return;
 
+        // Update CC price with small random variance
+        updateOraclePrice("CC", BASE_PRICE + ThreadLocalRandom.current().nextDouble(-PRICE_VARIANCE, PRICE_VARIANCE), oracleParty);
+
+        // Update USDC price (stable at 1.0) to keep it fresh for staleness checks
+        updateOraclePrice("USDC", 1.0, oracleParty);
+    }
+
+    private void updateOraclePrice(String asset, double price, String oracleParty) {
         try {
-            Optional<Map<String, Object>> ccOracle = repo.getOraclePrice("CC");
-            if (ccOracle.isEmpty()) {
-                logger.debug("No CC oracle price contract found, skipping update");
+            Optional<Map<String, Object>> oracle = repo.getOraclePrice(asset);
+            if (oracle.isEmpty()) {
+                logger.debug("No {} oracle price contract found, skipping update", asset);
                 return;
             }
 
-            String contractId = (String) ccOracle.get().get("contractId");
-            final double newPrice = Math.round((BASE_PRICE + ThreadLocalRandom.current().nextDouble(-PRICE_VARIANCE, PRICE_VARIANCE)) * 10000.0) / 10000.0;
+            String contractId = (String) oracle.get().get("contractId");
+            final double newPrice = Math.round(price * 10000.0) / 10000.0;
 
             ValueOuterClass.Value choiceArg = recordVal(
                     field("newPrice", numericVal(newPrice))
@@ -69,13 +77,13 @@ public class OraclePriceService {
                     "UpdatePrice",
                     choiceArg,
                     oracleParty
-            ).thenAccept(tx -> logger.info("Updated CC price to {} (tx: {})", newPrice, tx.getUpdateId()))
+            ).thenAccept(tx -> logger.info("Updated {} price to {} (tx: {})", asset, newPrice, tx.getUpdateId()))
              .exceptionally(e -> {
-                 logger.error("Failed to update oracle price", e);
+                 logger.error("Failed to update {} oracle price", asset, e);
                  return null;
              });
         } catch (Exception e) {
-            logger.warn("Oracle price update error", e);
+            logger.warn("Oracle {} price update error", asset, e);
         }
     }
 }
