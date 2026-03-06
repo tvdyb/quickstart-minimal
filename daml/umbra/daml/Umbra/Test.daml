@@ -169,14 +169,14 @@ testLending = script do
       borrowIndex = 1.0
       pauseCid
 
-  -- Alice supplies 10000 USDC (readAs operator to see pool contract)
-  (pool2, supplyPos, _) <- submitMulti [alice] [operator] do
+  -- Alice supplies 10000 USDC (operator acts on behalf)
+  (pool2, supplyPos, _) <- submit operator do
     exerciseCmd pool Supply with
       supplier = alice
       amount = 10000.0
 
   -- Bob borrows 1000 USDC with 200 CC collateral
-  (pool3, borrowPos, _) <- submitMulti [bob] [operator] do
+  (pool3, borrowPos, _) <- submit operator do
     exerciseCmd pool2 Borrow with
       borrower = bob
       borrowAmount = 1000.0
@@ -200,8 +200,8 @@ testLending = script do
   pool4 <- submit operator do
     exerciseCmd pool3 AccrueInterest
 
-  -- Bob partially repays (now exercised on pool, not position)
-  (pool5, residualOpt, _) <- submitMulti [bob] [operator] do
+  -- Bob partially repays (operator acts on behalf)
+  (pool5, residualOpt, _) <- submit operator do
     exerciseCmd pool4 RepayBorrow with
       borrower = bob
       positionCid = borrowPos
@@ -212,7 +212,7 @@ testLending = script do
     None -> abort "Expected residual borrow position after partial repay"
 
   -- Bob fully closes remaining debt.
-  (pool6, residualOpt2, _) <- submitMulti [bob] [operator] do
+  (pool6, residualOpt2, _) <- submit operator do
     exerciseCmd pool5 RepayBorrow with
       borrower = bob
       positionCid = residualBorrow
@@ -223,7 +223,7 @@ testLending = script do
     None -> pure ()
 
   -- Old oracle contracts are now stale (next day with 1h max age), borrowing should fail.
-  submitMultiMustFail [bob] [operator] do
+  submitMustFail operator do
     exerciseCmd pool6 Borrow with
       borrower = bob
       borrowAmount = 100.0
@@ -240,7 +240,7 @@ testLending = script do
       newPrice = 10.0
 
   -- Borrow cap enforcement.
-  submitMultiMustFail [bob] [operator] do
+  submitMustFail operator do
     exerciseCmd pool6 Borrow with
       borrower = bob
       borrowAmount = 1300.0
@@ -249,7 +249,7 @@ testLending = script do
       collateralOracleCid = ccOracleFresh
 
   -- Open a new borrow to test liquidation.
-  (pool7, riskyBorrow, _) <- submitMulti [bob] [operator] do
+  (pool7, riskyBorrow, _) <- submit operator do
     exerciseCmd pool6 Borrow with
       borrower = bob
       borrowAmount = 500.0
@@ -276,7 +276,7 @@ testLending = script do
   pure ()
 
   -- Test withdraw: Alice withdraws her supply
-  (_pool9, _, _) <- submitMulti [alice] [operator] do
+  (_pool9, _, _) <- submit operator do
     exerciseCmd _pool8 WithdrawSupply with
       supplier = alice
       positionCid = supplyPos

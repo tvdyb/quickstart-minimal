@@ -122,7 +122,7 @@ template LendingPool
       with
         supplier : Party
         amount : Decimal
-      controller supplier
+      controller operator
       do
         pause <- fetch pauseCid
         assertMsg ("Protocol is paused: " <> pause.reason) (not pause.isPaused)
@@ -169,7 +169,7 @@ template LendingPool
         collateralAmount : Decimal
         oracleCid : ContractId OraclePrice
         collateralOracleCid : ContractId OraclePrice
-      controller borrower
+      controller operator
       do
         pause <- fetch pauseCid
         assertMsg ("Protocol is paused: " <> pause.reason) (not pause.isPaused)
@@ -241,7 +241,7 @@ template LendingPool
         borrower : Party
         positionCid : ContractId BorrowPosition
         repayAmount : Decimal
-      controller borrower
+      controller operator
       do
         assertMsg "Repay amount must be positive" (repayAmount > 0.0)
 
@@ -301,7 +301,7 @@ template LendingPool
         positionCid : ContractId BorrowPosition
         borrowOracleCid : ContractId OraclePrice
         collateralOracleCid : ContractId OraclePrice
-      controller liquidator
+      controller operator
       do
         now <- getTime
 
@@ -400,7 +400,7 @@ template LendingPool
       with
         supplier : Party
         positionCid : ContractId SupplyPosition
-      controller supplier
+      controller operator
       do
         pause <- fetch pauseCid
         assertMsg ("Protocol is paused: " <> pause.reason) (not pause.isPaused)

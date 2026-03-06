@@ -105,6 +105,22 @@ public class UmbraLedgerClient {
     }
 
     /**
+     * Archive a contract by exercising the Archive choice.
+     */
+    public CompletableFuture<Void> archiveContract(
+            String contractId,
+            String moduleName,
+            String entityName,
+            String actAs
+    ) {
+        ValueOuterClass.Value emptyArg = ValueOuterClass.Value.newBuilder()
+                .setRecord(ValueOuterClass.Record.newBuilder().build())
+                .build();
+        return exerciseChoice(contractId, moduleName, entityName, "Archive", emptyArg, actAs)
+                .thenApply(tx -> null);
+    }
+
+    /**
      * Create a contract (fire-and-forget).
      */
     public CompletableFuture<Void> createContract(

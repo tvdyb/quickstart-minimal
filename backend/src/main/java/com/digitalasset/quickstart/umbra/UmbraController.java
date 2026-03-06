@@ -51,7 +51,9 @@ public class UmbraController {
      * Idempotent: skips contracts that already exist.
      */
     @PostMapping("/umbra/bootstrap")
-    public ResponseEntity<Map<String, Object>> bootstrap() {
+    public ResponseEntity<Map<String, Object>> bootstrap(
+            @org.springframework.web.bind.annotation.RequestParam(value = "force", defaultValue = "false") boolean force
+    ) {
         String operator = config.getOperatorParty();
         if (operator == null || operator.isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("error", "umbra.operator-party not configured"));
@@ -84,7 +86,14 @@ public class UmbraController {
             }
 
             // 2. DarkPoolOperator (needs pauseCid)
-            if (pqsSafe(() -> repo.getDarkPoolOperator()).isEmpty()) {
+            var existingDarkPool = pqsSafe(() -> repo.getDarkPoolOperator());
+            if (force && existingDarkPool.isPresent()) {
+                String oldCid = (String) existingDarkPool.get().get("contractId");
+                ledger.archiveContract(oldCid, "Umbra.DarkPool", "DarkPoolOperator", operator).get();
+                existingDarkPool = Optional.empty();
+                logger.info("Archived old DarkPoolOperator for force-recreate");
+            }
+            if (existingDarkPool.isEmpty()) {
                 if (pauseContractId != null) {
                     ledger.createContract("Umbra.DarkPool", "DarkPoolOperator", record(
                             field("operator", partyVal(operator)),
@@ -427,7 +436,7 @@ public class UmbraController {
                             "Umbra.Lending", "LendingPool",
                             "Supply",
                             choiceArg,
-                            supplier  // ✅ Only supplier signs
+                            config.getOperatorParty()
                     ).thenApply(tx -> ResponseEntity.ok(Map.<String, Object>of(
                             "status", "supplied",
                             "transactionId", tx.getUpdateId()
@@ -505,7 +514,7 @@ public class UmbraController {
                             "Umbra.Lending", "LendingPool",
                             "Borrow",
                             choiceArg,
-                            borrower  // ✅ Only borrower signs
+                            config.getOperatorParty()
                     ).thenApply(tx -> ResponseEntity.ok(Map.<String, Object>of(
                             "status", "borrowed",
                             "transactionId", tx.getUpdateId()
@@ -562,7 +571,7 @@ public class UmbraController {
                             "Umbra.Lending", "LendingPool",
                             "RepayBorrow",
                             choiceArg,
-                            borrower
+                            config.getOperatorParty()
                     ).thenApply(tx -> ResponseEntity.ok(Map.<String, Object>of(
                             "status", "repaid",
                             "transactionId", tx.getUpdateId()
@@ -630,7 +639,7 @@ public class UmbraController {
                             "Umbra.Lending", "LendingPool",
                             "LiquidateBorrow",
                             choiceArg,
-                            liquidator
+                            config.getOperatorParty()
                     ).thenApply(tx -> ResponseEntity.ok(Map.<String, Object>of(
                             "status", "liquidated",
                             "transactionId", tx.getUpdateId(),
