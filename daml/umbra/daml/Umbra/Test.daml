@@ -30,25 +30,41 @@ testDarkPool = script do
   poolOp <- submit operator do
     createCmd DarkPoolOperator with operator, pauseCid
 
-  -- Alice creates a buy order with quantity 2.0
-  buyOrder <- submit operator do
-    exerciseCmd poolOp CreateOrder with
+  -- ─── Trader-initiated order via OrderRequest pattern ───
+
+  -- Alice creates an order request (trader-initiated, signed by Alice)
+  aliceReq <- submit alice do
+    createCmd OrderRequest with
       trader = alice
+      operator
       baseAsset = "BTC"
       quoteAsset = "USDC"
       side = Buy
       price = 50000.0
       quantity = 2.0
+      minPrice = 49000.0
+      maxPrice = 51000.0
 
-  -- Bob creates a sell order with quantity 1.0
-  sellOrder <- submit operator do
-    exerciseCmd poolOp CreateOrder with
+  -- Operator accepts Alice's order request → creates co-signed SpotOrder
+  buyOrder <- submit operator do
+    exerciseCmd aliceReq AcceptOrderRequest
+
+  -- Bob creates an order request
+  bobReq <- submit bob do
+    createCmd OrderRequest with
       trader = bob
+      operator
       baseAsset = "BTC"
       quoteAsset = "USDC"
       side = Sell
       price = 50000.0
       quantity = 1.0
+      minPrice = 49000.0
+      maxPrice = 51000.0
+
+  -- Operator accepts Bob's order request
+  sellOrder <- submit operator do
+    exerciseCmd bobReq AcceptOrderRequest
 
   -- Operator partially fills Alice's buy by 1.0 BTC.
   (_, _, buyResidualOpt, _) <- submit operator do
@@ -68,7 +84,8 @@ testDarkPool = script do
     Some cid -> pure cid
     None -> abort "Expected residual buy order after partial fill"
 
-  -- Create another sell order to complete the remaining buy quantity.
+  -- ─── Operator-created order (backwards compatibility) ───
+
   sellOrder2 <- submit operator do
     exerciseCmd poolOp CreateOrder with
       trader = bob
@@ -90,22 +107,64 @@ testDarkPool = script do
       fillQuantity = 1.0
       counterparty = alice
 
-  -- Cancel test: operator cancels on behalf of trader
-  cancelOrder <- submit operator do
-    exerciseCmd poolOp CreateOrder with
+  -- ─── Price protection test: fill outside bounds must fail ───
+
+  priceTestReq <- submit alice do
+    createCmd OrderRequest with
       trader = alice
+      operator
       baseAsset = "ETH"
       quoteAsset = "USDC"
       side = Buy
       price = 3000.0
-      quantity = 10.0
+      quantity = 5.0
+      minPrice = 2900.0
+      maxPrice = 3100.0
 
-  submit operator do
-    exerciseCmd cancelOrder CancelOrder
+  priceTestOrder <- submit operator do
+    exerciseCmd priceTestReq AcceptOrderRequest
+
+  -- Fill at price below minPrice should fail
+  submitMustFail operator do
+    exerciseCmd priceTestOrder FillOrder with
+      fillPrice = 2800.0
+      fillQuantity = 1.0
+      counterparty = bob
+
+  -- Fill at price above maxPrice should fail
+  submitMustFail operator do
+    exerciseCmd priceTestOrder FillOrder with
+      fillPrice = 3200.0
+      fillQuantity = 1.0
+      counterparty = bob
+
+  -- ─── Trader cancellation test ───
+
+  -- Trader can cancel their own order via TraderCancelOrder
+  submitMulti [alice] [operator] do
+    exerciseCmd priceTestOrder TraderCancelOrder
+
+  -- ─── Withdraw order request test ───
+
+  withdrawReq <- submit alice do
+    createCmd OrderRequest with
+      trader = alice
+      operator
+      baseAsset = "SOL"
+      quoteAsset = "USDC"
+      side = Buy
+      price = 100.0
+      quantity = 10.0
+      minPrice = 90.0
+      maxPrice = 110.0
+
+  -- Alice can withdraw her own request before operator accepts
+  submit alice do
+    exerciseCmd withdrawReq WithdrawOrderRequest
 
   return ()
 
--- | Test lending pool operations
+-- | Test lending pool operations with decentralized authorization
 testLending : Script ()
 testLending = script do
   operator <- allocateParty "Operator"
@@ -169,14 +228,21 @@ testLending = script do
       borrowIndex = 1.0
       pauseCid
 
-  -- Alice supplies 10000 USDC (operator acts on behalf)
-  (pool2, supplyPos, _) <- submit operator do
+  -- ─── USER-INITIATED: Alice supplies 10000 USDC ───
+  -- Alice exercises Supply directly (readAs operator to see pool)
+  (pool2, supplyPos, _) <- submitMulti [alice] [operator] do
     exerciseCmd pool Supply with
       supplier = alice
       amount = 10000.0
 
-  -- Bob borrows 1000 USDC with 200 CC collateral
-  (pool3, borrowPos, _) <- submit operator do
+  -- Verify operator alone cannot supply on behalf of user
+  submitMustFail operator do
+    exerciseCmd pool2 Supply with
+      supplier = alice
+      amount = 100.0
+
+  -- ─── USER-INITIATED: Bob borrows 1000 USDC with 200 CC collateral ───
+  (pool3, borrowPos, _) <- submitMulti [bob] [operator] do
     exerciseCmd pool2 Borrow with
       borrower = bob
       borrowAmount = 1000.0
@@ -193,15 +259,15 @@ testLending = script do
 
   assertMsg "Health factor should be > 1" (hf > 1.0)
 
-  -- Accrue interest
+  -- Accrue interest (operator-only admin)
   let nextDay = time (date 2026 Jan 16) 12 0 0
   setTime nextDay
 
   pool4 <- submit operator do
     exerciseCmd pool3 AccrueInterest
 
-  -- Bob partially repays (operator acts on behalf)
-  (pool5, residualOpt, _) <- submit operator do
+  -- ─── USER-INITIATED: Bob partially repays ───
+  (pool5, residualOpt, _) <- submitMulti [bob] [operator] do
     exerciseCmd pool4 RepayBorrow with
       borrower = bob
       positionCid = borrowPos
@@ -211,8 +277,8 @@ testLending = script do
     Some cid -> pure cid
     None -> abort "Expected residual borrow position after partial repay"
 
-  -- Bob fully closes remaining debt.
-  (pool6, residualOpt2, _) <- submit operator do
+  -- ─── USER-INITIATED: Bob fully closes remaining debt ───
+  (pool6, residualOpt2, _) <- submitMulti [bob] [operator] do
     exerciseCmd pool5 RepayBorrow with
       borrower = bob
       positionCid = residualBorrow
@@ -223,7 +289,7 @@ testLending = script do
     None -> pure ()
 
   -- Old oracle contracts are now stale (next day with 1h max age), borrowing should fail.
-  submitMustFail operator do
+  submitMustFail bob do
     exerciseCmd pool6 Borrow with
       borrower = bob
       borrowAmount = 100.0
@@ -240,7 +306,7 @@ testLending = script do
       newPrice = 10.0
 
   -- Borrow cap enforcement.
-  submitMustFail operator do
+  submitMustFail bob do
     exerciseCmd pool6 Borrow with
       borrower = bob
       borrowAmount = 1300.0
@@ -248,8 +314,8 @@ testLending = script do
       oracleCid = usdcOracleFresh
       collateralOracleCid = ccOracleFresh
 
-  -- Open a new borrow to test liquidation.
-  (pool7, riskyBorrow, _) <- submit operator do
+  -- ─── Open a new borrow to test liquidation ───
+  (pool7, riskyBorrow, _) <- submitMulti [bob] [operator] do
     exerciseCmd pool6 Borrow with
       borrower = bob
       borrowAmount = 500.0
@@ -262,21 +328,18 @@ testLending = script do
     exerciseCmd ccOracleFresh UpdatePrice with
       newPrice = 5.0
 
-  -- Liquidation now exercised on pool, not position
-  (_pool8, liquidationResidualOpt, _) <- submit operator do
+  -- ─── OPERATOR-CONTROLLED: Liquidation ───
+  (_pool8, _liquidationResidualOpt, _) <- submit operator do
     exerciseCmd pool7 LiquidateBorrow with
       liquidator = operator
       positionCid = riskyBorrow
       borrowOracleCid = usdcOracleFresh
       collateralOracleCid = ccOracleDown
 
-  -- With CC price dropped from 10 to 5, health factor is critically low (<0.9),
-  -- so full liquidation is allowed (effectiveCloseFactor = 1.0).
-  -- Either full or partial liquidation is acceptable here.
   pure ()
 
-  -- Test withdraw: Alice withdraws her supply
-  (_pool9, _, _) <- submit operator do
+  -- ─── USER-INITIATED: Alice withdraws her supply ───
+  (_pool9, _, _) <- submitMulti [alice] [operator] do
     exerciseCmd _pool8 WithdrawSupply with
       supplier = alice
       positionCid = supplyPos

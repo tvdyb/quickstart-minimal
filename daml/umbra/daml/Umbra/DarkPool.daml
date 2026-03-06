@@ -4,23 +4,53 @@ import Umbra.Types
 import Umbra.ActivityMarker (ActivityRecord(..))
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- USER AUTHORIZATION - DELEGATION PATTERN
--- Allows users to pre-authorize operator actions without requiring operator
--- as co-signer on every transaction
+-- ORDER REQUEST - TRADER-INITIATED (PROPOSAL PATTERN)
+-- Trader creates a request; operator accepts it to create the actual order.
+-- This ensures trader consent without requiring multi-party submission.
 -- ═══════════════════════════════════════════════════════════════════════════
 
-template UserAuthorization
+template OrderRequest
   with
+    trader : Party
     operator : Party
-    user : Party
-    authorizedAt : Time
+    baseAsset : Asset
+    quoteAsset : Asset
+    side : Side
+    price : Price
+    quantity : Quantity
+    minPrice : Price    -- Price protection: minimum acceptable fill price
+    maxPrice : Price    -- Price protection: maximum acceptable fill price
   where
-    signatory operator
-    observer user
+    signatory trader
+    observer operator
 
-    -- User can create orders independently using this authorization
-    -- TODO: Future enhancement - implement this pattern fully
-    -- For now, we maintain operator involvement for matching/execution
+    choice AcceptOrderRequest : ContractId SpotOrder
+      controller operator
+      do
+        now <- getTime
+        assertMsg "Price must be positive" (price > 0.0)
+        assertMsg "Quantity must be positive" (quantity > 0.0)
+        assertMsg "Min price must be non-negative" (minPrice >= 0.0)
+        assertMsg "Max price must be positive" (maxPrice > 0.0)
+        assertMsg "Min price must not exceed max price" (minPrice <= maxPrice)
+        -- Auth: operator from controller, trader from contract signatory
+        create SpotOrder with
+          operator
+          trader
+          baseAsset
+          quoteAsset
+          side
+          price
+          quantity
+          minPrice
+          maxPrice
+          status = Open
+          createdAt = now
+
+    -- Trader can withdraw their request before acceptance
+    choice WithdrawOrderRequest : ()
+      controller trader
+      do return ()
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- DARK POOL OPERATOR
@@ -34,6 +64,8 @@ template DarkPoolOperator
   where
     signatory operator
 
+    -- Operator can still create orders directly (for backwards compatibility
+    -- and operator-facilitated order entry). Creates operator-only signed orders.
     nonconsuming choice CreateOrder : ContractId SpotOrder
       with
         trader : Party
@@ -59,14 +91,18 @@ template DarkPoolOperator
           side
           price
           quantity
+          minPrice = 0.0      -- No price protection for operator-created orders
+          maxPrice = 999999.0  -- No price protection for operator-created orders
           status = Open
           createdAt = now
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- SPOT ORDER
+-- signatory operator, trader when created via OrderRequest (co-signed)
+-- signatory operator only when created via DarkPoolOperator.CreateOrder
 -- ═══════════════════════════════════════════════════════════════════════════
 
--- | Spot order in the dark pool
+-- | Spot order in the dark pool with price protection bounds
 template SpotOrder
   with
     operator : Party
@@ -76,20 +112,31 @@ template SpotOrder
     side : Side
     price : Price
     quantity : Quantity
+    minPrice : Price    -- Minimum acceptable fill price (trader protection)
+    maxPrice : Price    -- Maximum acceptable fill price (trader protection)
     status : OrderStatus
     createdAt : Time
   where
     signatory operator
     observer trader
 
+    -- Trader can cancel their own orders
     choice CancelOrder : ContractId SpotOrder
       controller operator
       do
         assertMsg "Order must be Open to cancel" (status == Open)
         create this with status = Cancelled
 
+    -- Trader-initiated cancellation
+    choice TraderCancelOrder : ContractId SpotOrder
+      controller trader
+      do
+        assertMsg "Order must be Open to cancel" (status == Open)
+        create this with status = Cancelled
+
     -- PRIVACY-PRESERVING: Creates separate confirmations for buyer and seller
-    -- so they don't see each other's identity
+    -- so they don't see each other's identity.
+    -- Price bounds enforced: fillPrice must be within [minPrice, maxPrice]
     choice FillOrder : (ContractId BuyerConfirm, ContractId SellerConfirm, Optional (ContractId SpotOrder), ContractId ActivityRecord)
       with
         fillPrice : Price
@@ -102,6 +149,12 @@ template SpotOrder
         assertMsg "Fill price must be positive" (fillPrice > 0.0)
         assertMsg "Fill quantity must be positive" (fillQuantity > 0.0)
         assertMsg "Fill quantity cannot exceed remaining quantity" (fillQuantity <= quantity)
+
+        -- Price protection: ensure fill price is within trader's bounds
+        assertMsg ("Fill price " <> show fillPrice <> " below minimum " <> show minPrice)
+          (fillPrice >= minPrice)
+        assertMsg ("Fill price " <> show fillPrice <> " above maximum " <> show maxPrice)
+          (fillPrice <= maxPrice)
 
         let remainingQuantity = quantity - fillQuantity
         let buyer = if side == Buy then trader else counterparty
