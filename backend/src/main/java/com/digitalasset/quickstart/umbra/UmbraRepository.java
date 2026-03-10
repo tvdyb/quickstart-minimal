@@ -65,48 +65,6 @@ public class UmbraRepository {
     }
 
     /**
-     * Aggregated orderbook: buys and sells grouped by price level, no trader info.
-     */
-    public Map<String, Object> getOrderBook() {
-        List<Map<String, Object>> orders = getActiveOrders();
-        List<Map<String, Object>> buys = new ArrayList<>();
-        List<Map<String, Object>> sells = new ArrayList<>();
-
-        // Group by side and price
-        Map<String, Double> buyAgg = new TreeMap<>(Comparator.reverseOrder());
-        Map<String, Double> sellAgg = new TreeMap<>();
-
-        for (Map<String, Object> order : orders) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> payload = (Map<String, Object>) order.get("payload");
-            String side = String.valueOf(payload.get("side"));
-            double price = Double.parseDouble(String.valueOf(payload.get("price")));
-            double qty = Double.parseDouble(String.valueOf(payload.get("quantity")));
-            String priceKey = String.valueOf(price);
-
-            if ("Buy".equals(side)) {
-                buyAgg.merge(priceKey, qty, Double::sum);
-            } else {
-                sellAgg.merge(priceKey, qty, Double::sum);
-            }
-        }
-
-        for (var e : buyAgg.entrySet()) {
-            buys.add(Map.<String, Object>of("price", Double.parseDouble(e.getKey()), "quantity", e.getValue()));
-        }
-        for (var e : sellAgg.entrySet()) {
-            sells.add(Map.<String, Object>of("price", Double.parseDouble(e.getKey()), "quantity", e.getValue()));
-        }
-
-        return Map.<String, Object>of(
-                "buys", buys,
-                "sells", sells,
-                "bids", buys,
-                "asks", sells
-        );
-    }
-
-    /**
      * Get buyer confirmations for a specific buyer.
      * PRIVACY: Only returns trades where this party was the buyer.
      */
