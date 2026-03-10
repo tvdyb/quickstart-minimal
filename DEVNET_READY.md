@@ -1,19 +1,35 @@
-# Umbra Quickstart → Devnet Readiness Plan
+# Umbra Quickstart — Devnet Readiness Plan
 
-_Last updated: 2026-02-24 (CST)_
+_Last updated: 2026-03-09_
 
 ## Goal
 Take the locally-built quickstart and run it as a stable devnet deployment with repeatable releases and observability.
 
 ---
 
+## Recent fixes applied (PR #1)
+
+| Area | Fix | Why |
+|------|-----|-----|
+| DAML `RepayBorrow` | Accrue interest before computing debt | Borrowers could under-pay by repaying against stale `borrowIndex` |
+| DAML test | `testRepayAccruesInterest` | Proves residual debt exists after repaying original principal |
+| `LiquidationMonitor` | Exercise `LiquidateBorrow` on `LendingPool` | Old code called non-existent `Liquidate` on `BorrowPosition` |
+| `LiquidationMonitor` | Use `borrowIndex` for health factor | Was using `accumulatedIndex` (supply index), underestimating debt |
+| `ProtoHelper` | `BigDecimal` for `numericVal(double)` | `String.valueOf` emits scientific notation DAML rejects |
+| `MatchingEngine` | Per-cycle `skipContracts` + split try-catch | One stale order no longer blocks all subsequent matches |
+| `UmbraRepository` | Remove dead `getOrderBook()` | Never called; controller uses inline dark-mode stub |
+
+### Known limitations (not addressed in this PR)
+- Controller decomposition deferred — `UmbraController.java` (910 lines) works but would benefit from splitting into domain-focused controllers in a follow-up.
+- No JDK 21 compilation verification (Gradle 8.8 Kotlin DSL incompatible with JDK 25 on dev machine).
+
+---
+
 ## Deliverable from current phase
-You now have:
 - reproducible local run commands (`RUNBOOK.md`)
 - confirmed setup/build path
 - identified runtime blocker class (start/build interruptions via SIGKILL in constrained exec environment)
-
-This is enough to begin devnet prep in parallel while local start stabilization finishes.
+- critical bug fixes for lending interest accrual, liquidation monitor, and matching engine
 
 ---
 
@@ -43,7 +59,7 @@ Store in secret manager (1Password/Vault/GCP Secret Manager/etc.).
 
 ## 2) Devnet infra checklist
 - [ ] Container runtime host(s) with enough CPU/memory
-- [ ] Docker + compose (or convert compose → k8s manifests)
+- [ ] Docker + compose (or convert compose -> k8s manifests)
 - [ ] Persistent volumes for any stateful components/log retention
 - [ ] DNS entries (e.g., `app-provider.devnet.<domain>`)
 - [ ] Reverse proxy/ingress + TLS
@@ -74,7 +90,7 @@ Store in secret manager (1Password/Vault/GCP Secret Manager/etc.).
 
 ---
 
-## 5) Immediate next steps (what I’ll do next)
+## 5) Immediate next steps
 1. Produce `ENV_TEMPLATE.devnet` from current local vars (`.env`, `.env.local`, compose references) with secret placeholders.
 2. Produce `DEPLOY_CHECKLIST.md` with exact preflight + post-deploy commands.
 3. Separate runtime-related failures from project failures in a final local evidence report.
