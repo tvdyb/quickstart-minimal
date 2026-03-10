@@ -262,18 +262,26 @@ template LendingPool
         assertMsg "Pool asset mismatch" (asset == position.borrowAsset)
         assertMsg "Not position owner" (borrower == position.borrower)
 
-        let currentBorrowIdx = borrowIndex
+        -- Accrue interest first so debt is computed against a fresh borrowIndex
+        now <- getTime
+        let (newTotalSupply, newBorrows, newReserves, newSupplyIndex, newBorrowIndex) = accrueInterestInternal this now
+
+        let currentBorrowIdx = newBorrowIndex
         let growthFactor = currentBorrowIdx / position.entryIndex
         let currentDebt = position.borrowAmount * growthFactor
         let appliedRepayment = min repayAmount currentDebt
         let debtAfterRepay = currentDebt - appliedRepayment
-        let newTotalBorrows = max 0.0 (totalBorrows - appliedRepayment)
+        let newTotalBorrows = max 0.0 (newBorrows - appliedRepayment)
 
         archive positionCid
 
-        newPool <- create this with totalBorrows = newTotalBorrows
-
-        now <- getTime
+        newPool <- create this with
+          totalSupply = newTotalSupply
+          totalBorrows = newTotalBorrows
+          reserves = newReserves
+          accumulatedIndex = newSupplyIndex
+          borrowIndex = newBorrowIndex
+          lastUpdateTime = now
         residualPosition <-
           if debtAfterRepay <= dustThreshold
             then pure None
