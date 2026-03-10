@@ -8,7 +8,6 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
-import java.util.stream.Collectors;
 
 import static com.digitalasset.quickstart.umbra.ProtoHelper.*;
 
@@ -16,6 +15,14 @@ import static com.digitalasset.quickstart.umbra.ProtoHelper.*;
  * Dark pool matching engine. Runs every 2 seconds.
  * Polls active SpotOrders, matches crossing orders at midpoint price,
  * and executes FillOrder choices.
+ *
+ * Error recovery: contracts that fail during a cycle are skipped for the
+ * remainder of that cycle to prevent one stale/archived contract from
+ * blocking all subsequent matches.
+ *
+ * NOTE: buy and sell fills are submitted independently. If the buy fill
+ * succeeds but the sell fill fails, a partial fill results.  A future
+ * improvement could use atomic multi-exercise commands.
  */
 @Component
 public class MatchingEngine {
@@ -60,11 +67,20 @@ public class MatchingEngine {
             buys.sort((a, b) -> Double.compare(getPrice(b), getPrice(a)));
             sells.sort((a, b) -> Double.compare(getPrice(a), getPrice(b)));
 
+            // Track contracts that failed during this cycle so we skip them
+            Set<String> skipContracts = new HashSet<>();
+
             // Match crossing orders
             int bi = 0, si = 0;
             while (bi < buys.size() && si < sells.size()) {
                 Map<String, Object> buy = buys.get(bi);
                 Map<String, Object> sell = sells.get(si);
+                String buyContractId = (String) buy.get("contractId");
+                String sellContractId = (String) sell.get("contractId");
+
+                if (skipContracts.contains(buyContractId)) { bi++; continue; }
+                if (skipContracts.contains(sellContractId)) { si++; continue; }
+
                 double buyPrice = getPrice(buy);
                 double sellPrice = getPrice(sell);
 
@@ -86,8 +102,6 @@ public class MatchingEngine {
                 }
 
                 double midPrice = (buyPrice + sellPrice) / 2.0;
-                String buyContractId = (String) buy.get("contractId");
-                String sellContractId = (String) sell.get("contractId");
                 String buyer = String.valueOf(buyPayload.get("trader"));
                 String seller = String.valueOf(sellPayload.get("trader"));
                 String operator = config.getOperatorParty();
@@ -101,8 +115,8 @@ public class MatchingEngine {
 
                 logger.info("Matching orders: buy={} sell={} at midPrice={} quantity={}", buyContractId, sellContractId, midPrice, matchQuantity);
 
+                // Fill buy side
                 try {
-                    // Fill the buy order (controller = operator)
                     ValueOuterClass.Value fillBuyArg = recordVal(
                             field("fillPrice", numericVal(midPrice)),
                             field("fillQuantity", numericVal(matchQuantity)),
@@ -114,9 +128,16 @@ public class MatchingEngine {
                             "FillOrder",
                             fillBuyArg,
                             operator
-                    ).get(); // blocking - sequential matching is simpler
+                    ).get();
+                } catch (Exception e) {
+                    logger.error("Failed to fill BUY order {} — skipping for rest of cycle", buyContractId, e);
+                    skipContracts.add(buyContractId);
+                    bi++;
+                    continue;
+                }
 
-                    // Fill the sell order (controller = operator)
+                // Fill sell side
+                try {
                     ValueOuterClass.Value fillSellArg = recordVal(
                             field("fillPrice", numericVal(midPrice)),
                             field("fillQuantity", numericVal(matchQuantity)),
@@ -129,11 +150,14 @@ public class MatchingEngine {
                             fillSellArg,
                             operator
                     ).get();
-
-                    logger.info("Matched: {} buys from {} at {}", buyBase, seller, midPrice);
                 } catch (Exception e) {
-                    logger.error("Failed to match orders {} and {}", buyContractId, sellContractId, e);
+                    logger.error("Failed to fill SELL order {} (buy side already filled — partial fill)", sellContractId, e);
+                    skipContracts.add(sellContractId);
+                    si++;
+                    continue;
                 }
+
+                logger.info("Matched: {} buys from {} at {}", buyBase, seller, midPrice);
 
                 bi++;
                 si++;
