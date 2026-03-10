@@ -25,7 +25,7 @@ public class ProtoHelper {
     }
 
     public static Value numericVal(double d) {
-        return numericVal(String.valueOf(d));
+        return numericVal(new java.math.BigDecimal(d).stripTrailingZeros().toPlainString());
     }
 
     public static Value boolVal(boolean b) {
