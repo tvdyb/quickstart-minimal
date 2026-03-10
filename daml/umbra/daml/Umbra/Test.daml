@@ -481,3 +481,105 @@ testOracle = script do
       newPrice = 51000.0
 
   return ()
+
+-- | Test that RepayBorrow accrues interest before computing debt.
+--   Without the fix, repaying the exact principal would close the position
+--   because the stale borrowIndex makes the debt appear equal to the principal.
+testRepayAccruesInterest : Script ()
+testRepayAccruesInterest = script do
+  operator <- allocateParty "Operator"
+  borrower <- allocateParty "Borrower"
+  supplier <- allocateParty "Supplier"
+  oracle   <- allocateParty "Oracle"
+
+  let startTime = time (date 2026 Jan 15) 12 0 0
+  setTime startTime
+
+  pauseCid <- submit operator do
+    createCmd ProtocolPause with
+      operator
+      isPaused = False
+      reason = ""
+      pausedAt = None
+
+  usdcOracle <- submit oracle do
+    createCmd OraclePrice with
+      oracle
+      observers = [operator, borrower, supplier]
+      asset = "USDC"
+      price = 1.0
+      lastUpdated = startTime
+      minPrice = 0.90
+      maxPrice = 1.10
+      maxChangePercent = 0.1
+
+  ccOracle <- submit oracle do
+    createCmd OraclePrice with
+      oracle
+      observers = [operator, borrower, supplier]
+      asset = "CC"
+      price = 10.0
+      lastUpdated = startTime
+      minPrice = 0.01
+      maxPrice = 100.0
+      maxChangePercent = 0.5
+
+  let rateModel = RateModelParams with
+        baseRate = 0.02
+        multiplier = 0.1
+        jumpMultiplier = 3.0
+        kink = 0.80
+
+  pool <- submit operator do
+    createCmd LendingPool with
+      operator
+      asset = "USDC"
+      totalSupply = 0.0
+      totalBorrows = 0.0
+      reserves = 0.0
+      reserveFactor = 0.10
+      borrowCap = None
+      rateModel
+      collateralConfig = defaultCCCollateral
+      lastUpdateTime = startTime
+      accumulatedIndex = 1.0
+      borrowIndex = 1.0
+      pauseCid
+
+  -- Supply 100k USDC
+  (pool2, _, _) <- submit operator do
+    exerciseCmd pool Supply with
+      supplier = supplier
+      amount = 100000.0
+      submitter = operator
+
+  -- Borrow 1000 USDC with 200 CC collateral
+  (pool3, borrowPos, _) <- submit operator do
+    exerciseCmd pool2 Borrow with
+      borrower = borrower
+      borrowAmount = 1000.0
+      collateralAmount = 200.0
+      oracleCid = usdcOracle
+      collateralOracleCid = ccOracle
+      submitter = operator
+
+  -- Advance 1 day WITHOUT calling AccrueInterest manually.
+  -- RepayBorrow should accrue interest internally.
+  let oneDay = time (date 2026 Jan 16) 12 0 0
+  setTime oneDay
+
+  -- Repay exactly the original principal (1000).
+  -- If interest was NOT accrued, this would close the position (debt == 1000).
+  -- With the fix, debt > 1000 due to accrued interest, leaving a residual.
+  (_, residualOpt, _) <- submit operator do
+    exerciseCmd pool3 RepayBorrow with
+      borrower = borrower
+      positionCid = borrowPos
+      repayAmount = 1000.0
+      submitter = operator
+
+  case residualOpt of
+    None -> abort "BUG: RepayBorrow did not accrue interest — position closed at stale debt"
+    Some _ -> pure ()
+
+  return ()

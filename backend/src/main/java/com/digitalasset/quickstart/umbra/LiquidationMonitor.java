@@ -19,7 +19,7 @@ import static com.digitalasset.quickstart.umbra.ProtoHelper.*;
  * The health factor calculation is on-chain in DAML. This bot calculates locally for optimization,
  * but the DAML contract validates everything atomically with fresh oracle prices.
  *
- * This is an optional bot. Anyone can liquidate directly by calling BorrowPosition.Liquidate.
+ * This is an optional bot. Liquidation is exercised via LendingPool.LiquidateBorrow.
  */
 @Component
 public class LiquidationMonitor {
@@ -101,7 +101,7 @@ public class LiquidationMonitor {
 
                 @SuppressWarnings("unchecked")
                 Map<String, Object> poolPayload = (Map<String, Object>) poolOpt.get().get("payload");
-                double accIndex = Double.parseDouble(String.valueOf(poolPayload.get("accumulatedIndex")));
+                double currentBorrowIndex = Double.parseDouble(String.valueOf(poolPayload.get("borrowIndex")));
                 String poolContractId = (String) poolOpt.get().get("contractId");
 
                 @SuppressWarnings("unchecked")
@@ -112,8 +112,8 @@ public class LiquidationMonitor {
                 double entryIndex = Double.parseDouble(String.valueOf(payload.get("entryIndex")));
                 double liquidationThreshold = Double.parseDouble(String.valueOf(payload.get("liquidationThreshold")));
 
-                // Calculate health factor locally (on-chain DAML validates authoritatively)
-                double growthFactor = accIndex / entryIndex;
+                // Calculate health factor locally using borrowIndex (on-chain DAML validates authoritatively)
+                double growthFactor = currentBorrowIndex / entryIndex;
                 double currentDebt = borrowAmount * growthFactor;
                 double debtValue = currentDebt * borrowPrice;
                 double collateralValue = collateralAmount * collPrice;
@@ -126,15 +126,15 @@ public class LiquidationMonitor {
 
                     ValueOuterClass.Value choiceArg = recordVal(
                             field("liquidator", partyVal(operator)),
-                            field("poolCid", contractIdVal(poolContractId)),
+                            field("positionCid", contractIdVal(contractId)),
                             field("borrowOracleCid", contractIdVal(borrowOracleCid)),
                             field("collateralOracleCid", contractIdVal(collOracleCid))
                     );
 
                     ledger.exerciseChoice(
-                            contractId,
-                            "Umbra.Lending", "BorrowPosition",
-                            "Liquidate",
+                            poolContractId,
+                            "Umbra.Lending", "LendingPool",
+                            "LiquidateBorrow",
                             choiceArg,
                             operator
                     ).thenAccept(tx -> {
